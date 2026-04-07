@@ -166,8 +166,12 @@ router.get('/:id', authenticate, async (req, res) => {
                   p.imdb_score, p.rotten_tomatoes_score, p.awards, p.streaming_links, p.cast_with_photos,
                   p.book_editions, p.book_awards, p.tour_dates, p.spotify_url, p.apple_music_url,
                   p.price_range, p.menu_url, p.weather_forecast, p.nutrition, p.difficulty,
+                  p.course_duration_hours::float AS course_duration_hours,
+                  p.abv::float AS abv,
                   up.source_url, up.source_type, up.screenshot_url,
-                  up.is_tracking, up.notes, up.created_at as saved_at, up.price_target,
+                  up.is_tracking, up.notes, up.created_at as saved_at,
+                  up.price_target::float AS price_target,
+                  up.purchase_price::float AS purchase_price,
                   up.current_page, up.checked_ingredients, up.size_preference, up.colour_preference
            FROM products p
            JOIN user_products up ON up.product_id = p.id
@@ -434,9 +438,14 @@ router.post('/:id/recategorize', authenticate, async (req, res) => {
     await reExtractProduct(req.params.id, req.user.id, category);
     // Return the freshly updated product using the existing fetch query
     const result = await query(
-      `SELECT p.*, up.source_url, up.source_type, up.notes, up.is_tracking,
+      `SELECT p.*,
+              p.course_duration_hours::float AS course_duration_hours,
+              p.abv::float AS abv,
+              up.source_url, up.source_type, up.notes, up.is_tracking,
               up.current_page, up.checked_ingredients, up.size_preference, up.colour_preference,
               up.saved_at,
+              up.price_target::float AS price_target,
+              up.purchase_price::float AS purchase_price,
               COALESCE(json_agg(DISTINCT jsonb_build_object(
                 'id', pr.id, 'retailer_name', pr.retailer_name, 'product_url', pr.product_url,
                 'current_price', pr.current_price, 'currency', pr.currency,
@@ -448,7 +457,7 @@ router.post('/:id/recategorize', authenticate, async (req, res) => {
        WHERE p.id = $1 AND up.user_id = $2
        GROUP BY p.id, up.source_url, up.source_type, up.notes, up.is_tracking,
                 up.current_page, up.checked_ingredients, up.size_preference, up.colour_preference,
-                up.saved_at`,
+                up.saved_at, up.price_target, up.purchase_price`,
       [req.params.id, req.user.id]
     );
     if (!result.rows.length) return res.status(404).json({ error: 'Product not found' });
