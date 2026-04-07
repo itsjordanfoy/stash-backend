@@ -190,7 +190,8 @@ router.get('/:id', authenticate, async (req, res) => {
           [req.params.id]
         ),
         query(
-          `SELECT p.id, p.name, p.brand, p.image_url, pa.reason, pa.similarity_score,
+          `SELECT p.id, p.name, p.brand, p.image_url, pa.reason,
+                  pa.similarity_score::float AS similarity_score,
                   (SELECT MIN(current_price)::float FROM product_retailers WHERE product_id = p.id) AS lowest_price
            FROM product_alternatives pa
            JOIN products p ON p.id = pa.alternative_id
