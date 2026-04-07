@@ -145,7 +145,7 @@ async function verifyAppleToken(identityToken) {
   const publicKey = crypto.createPublicKey({ key, format: 'jwk' });
   const payload = jwt.verify(identityToken, publicKey, {
     algorithms: ['RS256'],
-    audience: process.env.APPLE_BUNDLE_ID || 'com.yourcompany.producttracker',
+    audience: process.env.APPLE_BUNDLE_ID || 'com.jordanfoy.stash',
     issuer: 'https://appleid.apple.com',
   });
   return payload;
