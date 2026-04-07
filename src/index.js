@@ -24,6 +24,7 @@ const priceRoutes = require('./routes/prices');
 const subscriptionRoutes = require('./routes/subscriptions');
 const notificationRoutes = require('./routes/notifications');
 const searchRoutes = require('./routes/search');
+const proxyRoutes = require('./routes/proxy');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -69,6 +70,7 @@ app.use('/api/prices', priceRoutes);
 app.use('/api/subscriptions', subscriptionRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/search', searchRoutes);
+app.use('/api/proxy', proxyRoutes);
 
 // 404 handler
 app.use((req, res) => {

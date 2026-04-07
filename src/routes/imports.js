@@ -49,8 +49,14 @@ router.post('/screenshot', authenticate, loadUserData, upload.single('screenshot
   if (!req.file) return res.status(400).json({ error: 'Screenshot file required' });
 
   try {
-    // Upload to S3
-    const screenshotKey = await uploadScreenshot(req.file.buffer, req.file.mimetype);
+    // Upload to S3 — optional. If AWS credentials are not configured the import
+    // still works; the AI vision analysis runs from the in-memory base64 buffer.
+    let screenshotKey = null;
+    try {
+      screenshotKey = await uploadScreenshot(req.file.buffer, req.file.mimetype);
+    } catch (s3Err) {
+      logger.warn('S3 upload skipped — screenshot will not be persisted', { error: s3Err.message });
+    }
 
     // Convert to base64 for AI analysis
     const base64Image = req.file.buffer.toString('base64');
@@ -58,7 +64,7 @@ router.post('/screenshot', authenticate, loadUserData, upload.single('screenshot
     const result = await startImport({
       userId: req.user.id,
       sourceType: 'screenshot',
-      screenshotKey,
+      screenshotKey, // may be null — importService handles this gracefully
       rawText: base64Image, // passed to AI vision
     });
 
