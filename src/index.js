@@ -60,6 +60,45 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+// One-off S3 image migration — protected by a secret token, disabled in dev
+app.post('/admin/migrate-images', async (req, res) => {
+  const secret = process.env.ADMIN_SECRET;
+  if (!secret || req.headers['x-admin-secret'] !== secret) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  res.json({ message: 'Migration started — check Railway logs for progress' });
+  // Run async after responding so the HTTP connection doesn't time out
+  const { query } = require('./database/db');
+  const { uploadProductImages } = require('./services/storageService');
+  const { logger } = require('./utils/logger');
+  (async () => {
+    logger.info('=== S3 Image Migration Starting ===');
+    const result = await query(`SELECT id, name, image_url, images FROM products WHERE image_url IS NOT NULL ORDER BY created_at DESC`);
+    const products = result.rows;
+    logger.info(`Migrating ${products.length} products`);
+    let updated = 0, skipped = 0, errors = 0;
+    for (const p of products) {
+      const imageList = Array.isArray(p.images) ? p.images : [];
+      const allUrls = [p.image_url, ...imageList].filter(Boolean);
+      if (allUrls.every(u => u.includes('amazonaws.com'))) { skipped++; continue; }
+      try {
+        const { imageUrl: newImageUrl, images: newImages } = await uploadProductImages(p.image_url, imageList);
+        await query(
+          `UPDATE products SET image_url = $1, images = $2::jsonb, updated_at = NOW() WHERE id = $3`,
+          [newImageUrl || p.image_url, JSON.stringify(newImages.length ? newImages : imageList), p.id]
+        );
+        logger.info(`[OK] "${p.name}" — uploaded to S3`);
+        updated++;
+      } catch (err) {
+        logger.warn(`[FAIL] "${p.name}" — ${err.message}`);
+        errors++;
+      }
+      await new Promise(r => setTimeout(r, 150));
+    }
+    logger.info(`=== Migration Complete === updated:${updated} skipped:${skipped} errors:${errors}`);
+  })().catch(err => logger.error('Migration error', { error: err.message }));
+});
+
 // API routes
 app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
