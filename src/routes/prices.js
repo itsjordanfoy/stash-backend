@@ -47,7 +47,7 @@ router.get('/:productId/history', authenticate, async (req, res) => {
 router.get('/:productId/retailers', authenticate, async (req, res) => {
   try {
     const result = await query(
-      `SELECT id, retailer_name, product_url, current_price, currency, in_stock, last_checked
+      `SELECT id, retailer_name, product_url, current_price::float, currency, in_stock, last_checked
        FROM product_retailers
        WHERE product_id = $1
        ORDER BY current_price ASC NULLS LAST`,
