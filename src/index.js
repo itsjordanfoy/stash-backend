@@ -67,15 +67,14 @@ app.post('/admin/migrate-images', async (req, res) => {
     return res.status(403).json({ error: 'Forbidden' });
   }
   res.json({ message: 'Migration started — check Railway logs for progress' });
-  // Run async after responding so the HTTP connection doesn't time out
   const { query } = require('./database/db');
   const { uploadProductImages } = require('./services/storageService');
-  const { logger } = require('./utils/logger');
   (async () => {
-    logger.info('=== S3 Image Migration Starting ===');
+    console.log('[MIGRATE] === S3 Image Migration Starting ===');
+    console.log(`[MIGRATE] AWS_S3_BUCKET=${process.env.AWS_S3_BUCKET} AWS_REGION=${process.env.AWS_REGION}`);
     const result = await query(`SELECT id, name, image_url, images FROM products WHERE image_url IS NOT NULL ORDER BY created_at DESC`);
     const products = result.rows;
-    logger.info(`Migrating ${products.length} products`);
+    console.log(`[MIGRATE] Found ${products.length} products to process`);
     let updated = 0, skipped = 0, errors = 0;
     for (const p of products) {
       const imageList = Array.isArray(p.images) ? p.images : [];
@@ -87,16 +86,16 @@ app.post('/admin/migrate-images', async (req, res) => {
           `UPDATE products SET image_url = $1, images = $2::jsonb, updated_at = NOW() WHERE id = $3`,
           [newImageUrl || p.image_url, JSON.stringify(newImages.length ? newImages : imageList), p.id]
         );
-        logger.info(`[OK] "${p.name}" — uploaded to S3`);
+        console.log(`[MIGRATE] OK: "${p.name}"`);
         updated++;
       } catch (err) {
-        logger.warn(`[FAIL] "${p.name}" — ${err.message}`);
+        console.log(`[MIGRATE] FAIL: "${p.name}" — ${err.message}`);
         errors++;
       }
       await new Promise(r => setTimeout(r, 150));
     }
-    logger.info(`=== Migration Complete === updated:${updated} skipped:${skipped} errors:${errors}`);
-  })().catch(err => logger.error('Migration error', { error: err.message }));
+    console.log(`[MIGRATE] === Complete === updated:${updated} skipped:${skipped} errors:${errors}`);
+  })().catch(err => console.log(`[MIGRATE] Fatal: ${err.message}`));
 });
 
 // API routes
