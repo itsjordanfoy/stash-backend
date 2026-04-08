@@ -1,7 +1,7 @@
 const { query, transaction } = require('../database/db');
 const aiService = require('./aiService');
 const scraperService = require('./scraperService');
-const { getPresignedUrl } = require('./storageService');
+const { getPresignedUrl, uploadProductImages } = require('./storageService');
 const { logger } = require('../utils/logger');
 const { v4: uuidv4 } = require('uuid');
 const { enrichEntertainment } = require('./omdbService');
@@ -191,6 +191,19 @@ async function processImport(importId, { userId, sourceType, sourceUrl, screensh
     // Ensure every item has a description — generate one from metadata if extraction missed it
     if (!extractedData.description && extractedData.name) {
       extractedData.description = await aiService.generateDescription(extractedData).catch(() => null);
+    }
+
+    // Upload all product images to S3 so the app can always load them regardless
+    // of the original retailer's CDN hotlink policy or Railway's datacenter IP.
+    if (extractedData.image_url || (extractedData.images || []).length > 0) {
+      const s3Result = await uploadProductImages(
+        extractedData.image_url,
+        extractedData.images || []
+      ).catch(() => null);
+      if (s3Result) {
+        extractedData.image_url = s3Result.imageUrl || extractedData.image_url;
+        extractedData.images = s3Result.images.length > 0 ? s3Result.images : extractedData.images;
+      }
     }
 
     if (!extractedData || extractedData.confidence < 0.2) {
