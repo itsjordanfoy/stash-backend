@@ -115,6 +115,8 @@ function downloadImage(url, redirectsLeft = 4) {
 async function uploadImageFromUrl(sourceUrl) {
   if (!process.env.AWS_ACCESS_KEY_ID || !process.env.AWS_S3_BUCKET) return null;
   try {
+    // Normalise protocol-relative URLs (//cdn.shopify.com/...) to https
+    if (sourceUrl.startsWith('//')) sourceUrl = 'https:' + sourceUrl;
     const { buffer, contentType } = await downloadImage(sourceUrl);
     const ext = contentType.split('/')[1]?.split(';')[0] || 'jpg';
     const key = `products/${uuidv4()}.${ext}`;
