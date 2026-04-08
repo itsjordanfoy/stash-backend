@@ -219,6 +219,21 @@ router.get('/:id', authenticate, async (req, res) => {
       return min === null ? r.current_price : Math.min(min, r.current_price);
     }, null);
 
+    // Ensure JSONB string-map fields only contain string values.
+    // The AI may store numeric or boolean values (e.g. specs: { coverage: 15 })
+    // which Swift's [String:String] decoder rejects with a typeMismatch error.
+    const stringifyValues = (obj) => {
+      if (!obj || typeof obj !== 'object') return obj;
+      const out = {};
+      for (const [k, v] of Object.entries(obj)) {
+        out[k] = v == null ? null : String(v);
+      }
+      return out;
+    };
+    if (product.specs)         product.specs          = stringifyValues(product.specs);
+    if (product.opening_hours) product.opening_hours  = stringifyValues(product.opening_hours);
+    if (product.streaming_links) product.streaming_links = stringifyValues(product.streaming_links);
+
     res.set('Cache-Control', 'private, max-age=30, stale-while-revalidate=60');
     res.json({
       ...product,
