@@ -189,6 +189,28 @@ router.post('/apple', async (req, res) => {
   }
 });
 
+// POST /api/auth/dev-login  — development only, never available in production
+// Lets the iOS simulator log in by email alone (no password needed).
+router.post('/dev-login', async (req, res) => {
+  if (process.env.NODE_ENV === 'production') {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ error: 'email required' });
+  try {
+    const result = await query(
+      'SELECT id, email, display_name FROM users WHERE email = $1',
+      [email]
+    );
+    if (!result.rows.length) return res.status(404).json({ error: 'User not found' });
+    const user = result.rows[0];
+    const token = generateToken(user.id);
+    res.json({ token, user: { id: user.id, email: user.email, displayName: user.display_name } });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // POST /api/auth/push-token
 router.post('/push-token', require('../middleware/auth').authenticate, async (req, res) => {
   const { pushToken } = req.body;
