@@ -335,13 +335,14 @@ async function createProduct(data, sourceUrl, sourceType) {
          game_platforms, metacritic_score, playtime_estimate, studio,
          wine_region, grape_variety, abv, tasting_notes, food_pairing,
          publication_name, read_time_minutes, word_count, article_tags,
-         pricing_model, app_store_url, app_category, app_version
+         pricing_model, app_store_url, app_category, app_version,
+         phone, rating, review_count
        )
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,
                $23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,
                $42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,$55,$56,
                $57,$58,$59,$60,$61,$62,$63,$64,$65,$66,$67,$68,$69,$70,$71,$72,$73,$74,$75,
-               $76,$77,$78,$79,$80,$81,$82,$83)
+               $76,$77,$78,$79,$80,$81,$82,$83,$84,$85,$86)
        ON CONFLICT (canonical_id) DO UPDATE
          SET name      = EXCLUDED.name,
              image_url = COALESCE(EXCLUDED.image_url, products.image_url),
@@ -433,6 +434,9 @@ async function createProduct(data, sourceUrl, sourceType) {
         data.app_store_url || null,        // $81
         data.app_category || null,         // $82
         data.app_version || null,          // $83
+        data.phone || null,                // $84
+        data.rating || null,               // $85
+        data.review_count || null,         // $86
       ]
     );
     const productId = productResult.rows[0].id;
@@ -660,6 +664,7 @@ async function updateProductFields(productId, data) {
       book_editions = $47, book_awards = $48, tour_dates = $49,
       spotify_url = $50, apple_music_url = $51,
       price_range = $52, menu_url = $53, nutrition = $54, difficulty = $55,
+      phone = $57, rating = $58, review_count = $59,
       updated_at = NOW()
     WHERE id = $56`,
     [
@@ -718,7 +723,10 @@ async function updateProductFields(productId, data) {
       data.menu_url || null,
       data.nutrition ? JSON.stringify(data.nutrition) : null,
       data.difficulty || null,
-      productId,
+      productId,                           // $56
+      data.phone || null,                  // $57
+      data.rating || null,                 // $58
+      data.review_count || null,           // $59
     ]
   );
 }

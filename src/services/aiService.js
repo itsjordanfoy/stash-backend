@@ -133,6 +133,9 @@ async function extractProductFromUrl(url, htmlContent = null, ogData = null, cat
   "reservation_url": "OpenTable, Resy, or direct booking URL (places only, else null)",
   "price_range": 1, 2, 3, or 4 representing £/££/£££/££££ (places only, else null),
   "menu_url": "direct link to menu page (restaurants/cafes only, else null)",
+  "phone": "phone number as string e.g. '+44 20 7946 0958' (places only, else null)",
+  "rating": "average user/critic rating as decimal e.g. 4.2 (places only, else null)",
+  "review_count": "number of reviews as integer e.g. 1842 (places only, else null)",
 
   "servings": number of servings as integer (recipes only, else null),
   "cook_time": "total cooking time as string e.g. '45 minutes', '1 hour 20 minutes' (recipes only, else null)",

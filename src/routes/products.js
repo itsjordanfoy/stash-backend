@@ -389,9 +389,9 @@ router.post('/:id/find-retailers', authenticate, async (req, res) => {
 });
 
 // POST /api/products/:id/auto-board
-// Assigns the product to the best-matching board.
-// Priority: 1) exact name match on filterTag  2) create a new board with that name.
-// Always succeeds — a stash is always created/assigned on import.
+// Returns the best-matching existing board for the product (suggestion only — does NOT assign).
+// Priority: 1) exact name match on filterTag  2) fuzzy: board name contains filterTag words
+// Returns { board: null } if no suitable existing board found.
 router.post('/:id/auto-board', authenticate, async (req, res) => {
   try {
     const productResult = await query(
@@ -405,7 +405,6 @@ router.post('/:id/auto-board', authenticate, async (req, res) => {
     const product = productResult.rows[0];
 
     const targetName = computeFilterTag(product);
-    const targetEmoji = FILTER_TAG_EMOJI[targetName] || '📦';
 
     // Fetch existing boards
     const boardsResult = await query(
@@ -417,26 +416,21 @@ router.post('/:id/auto-board', authenticate, async (req, res) => {
     // 1. Exact name match (case-insensitive)
     let board = boards.find(b => b.name.toLowerCase() === targetName.toLowerCase());
 
-    // 2. No match — create a new board named after the filterTag
+    // 2. Fuzzy: board name contains the filterTag words, or filterTag contained in board name
     if (!board) {
-      const created = await query(
-        `INSERT INTO boards (name, emoji, owner_id)
-         VALUES ($1, $2, $3)
-         RETURNING id, name, emoji`,
-        [targetName, targetEmoji, req.user.id]
-      );
-      board = created.rows[0];
+      const targetWords = targetName.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+      board = boards.find(b => {
+        const bn = b.name.toLowerCase();
+        // board name contains any filterTag word (e.g. "Home Improvements" contains "home")
+        if (targetWords.some(w => bn.includes(w))) return true;
+        // filterTag contains any word from board name (e.g. filterTag "Clothing" matches board "Clothes")
+        const boardWords = bn.split(/\s+/).filter(w => w.length > 2);
+        return boardWords.some(w => targetName.toLowerCase().includes(w));
+      });
     }
 
-    // Assign product to board
-    await query(
-      `INSERT INTO board_items (board_id, product_id, added_by)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (board_id, product_id) DO NOTHING`,
-      [board.id, req.params.id, req.user.id]
-    );
-
-    res.json({ board: { id: board.id, name: board.name, emoji: board.emoji || null } });
+    // No match — return null (never create boards here)
+    res.json({ board: board ? { id: board.id, name: board.name, emoji: board.emoji || null } : null });
   } catch (err) {
     console.error('auto-board error:', err.message);
     res.json({ board: null });
