@@ -28,6 +28,39 @@ async function testConnection() {
   }
 }
 
+/**
+ * Run idempotent schema migrations on startup.
+ * All statements use ADD COLUMN IF NOT EXISTS / DROP CONSTRAINT IF EXISTS
+ * so they are safe to re-run on every deploy.
+ */
+async function runMigrations() {
+  const client = await pool.connect();
+  try {
+    // New columns added after initial schema
+    await client.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS phone TEXT`);
+    await client.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS rating NUMERIC(3,2)`);
+    await client.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS review_count INTEGER`);
+    await client.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS suggested_questions JSONB`);
+    await client.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS display_config JSONB`);
+
+    // Widen item_type constraint to cover all supported types
+    await client.query(`ALTER TABLE products DROP CONSTRAINT IF EXISTS products_item_type_check`);
+    await client.query(`
+      ALTER TABLE products ADD CONSTRAINT products_item_type_check
+        CHECK (item_type IN (
+          'product','place','entertainment','event','general',
+          'course','podcast','youtube_video','video_game','wine','article','app'
+        ))
+    `);
+
+    logger.info('Database migrations complete');
+  } catch (err) {
+    logger.error('Migration error (non-fatal):', err.message);
+  } finally {
+    client.release();
+  }
+}
+
 async function query(text, params) {
   const start = Date.now();
   try {
@@ -68,4 +101,4 @@ async function transaction(fn) {
   }
 }
 
-module.exports = { pool, query, getClient, transaction, testConnection };
+module.exports = { pool, query, getClient, transaction, testConnection, runMigrations };

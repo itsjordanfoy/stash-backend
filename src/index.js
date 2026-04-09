@@ -5,7 +5,7 @@ const cors = require('cors');
 const compression = require('compression');
 const rateLimit = require('express-rate-limit');
 const { logger } = require('./utils/logger');
-const { testConnection } = require('./database/db');
+const { testConnection, runMigrations } = require('./database/db');
 
 // Prevent unhandled promise rejections (e.g. DB timeouts) from crashing the process
 process.on('unhandledRejection', (reason) => {
@@ -127,6 +127,7 @@ app.use((err, req, res, next) => {
 
 async function start() {
   await testConnection();
+  await runMigrations();
   const { startScheduler } = require('./jobs/priceTracker');
   startScheduler();
   app.listen(PORT, () => {
