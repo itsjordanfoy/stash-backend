@@ -477,6 +477,39 @@ router.post('/:id/recategorize', authenticate, async (req, res) => {
   }
 });
 
+// POST /api/products/:id/ask — SSE streaming AI answer about this product
+router.post('/:id/ask', authenticate, async (req, res) => {
+  const { question } = req.body;
+  if (!question) return res.status(400).json({ error: 'question is required' });
+
+  try {
+    const productResult = await query(
+      `SELECT p.* FROM products p
+       JOIN user_products up ON up.product_id = p.id
+       WHERE p.id = $1 AND up.user_id = $2`,
+      [req.params.id, req.user.id]
+    );
+    if (!productResult.rows[0]) return res.status(404).json({ error: 'Product not found' });
+
+    const { streamProductAnswer } = require('../services/aiService');
+
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders();
+
+    await streamProductAnswer(productResult.rows[0], question, res);
+  } catch (err) {
+    console.error('Ask error:', err.message);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Failed to answer question' });
+    } else {
+      res.write(`data: [DONE]\n\n`);
+      res.end();
+    }
+  }
+});
+
 // DELETE /api/products/:id  (removes from user's library, not globally)
 router.delete('/:id', authenticate, async (req, res) => {
   try {

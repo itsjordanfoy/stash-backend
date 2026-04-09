@@ -30,10 +30,11 @@ router.post('/link', authenticate, loadUserData, async (req, res) => {
   }
 
   try {
-    const sourceType = detectSourceType(url);
     const result = await startImport({
       userId: req.user.id,
-      sourceType: ['instagram', 'tiktok', 'pinterest'].includes(sourceType) ? 'social' : 'link',
+      // All URLs go through the full scraping pipeline — no hard social block.
+      // Users should be able to save anything they want.
+      sourceType: 'link',
       sourceUrl: url,
     });
 

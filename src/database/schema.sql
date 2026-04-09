@@ -408,6 +408,24 @@ ALTER TABLE products ADD COLUMN IF NOT EXISTS pricing_model VARCHAR(20);
 ALTER TABLE products ADD COLUMN IF NOT EXISTS app_store_url TEXT;
 ALTER TABLE products ADD COLUMN IF NOT EXISTS app_category VARCHAR(100);
 ALTER TABLE products ADD COLUMN IF NOT EXISTS app_version VARCHAR(50);
+ALTER TABLE products ADD COLUMN IF NOT EXISTS reviews JSONB;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS suggested_questions JSONB;
+
+-- Places — contact & aggregate data
+ALTER TABLE products ADD COLUMN IF NOT EXISTS phone TEXT;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS rating NUMERIC(3,2);
+ALTER TABLE products ADD COLUMN IF NOT EXISTS review_count INTEGER;
+
+-- Dynamic page layout config — AI-generated for novel/general items
+ALTER TABLE products ADD COLUMN IF NOT EXISTS display_config JSONB;
+
+-- Widen item_type to cover all supported item categories
+ALTER TABLE products DROP CONSTRAINT IF EXISTS products_item_type_check;
+ALTER TABLE products ADD CONSTRAINT products_item_type_check
+  CHECK (item_type IN (
+    'product','place','entertainment','event','general',
+    'course','podcast','youtube_video','video_game','wine','article','app'
+  ));
 
 -- User-specific status fields (user_products)
 ALTER TABLE user_products ADD COLUMN IF NOT EXISTS listen_status VARCHAR(20);

@@ -69,7 +69,7 @@ async function extractProductFromUrl(url, htmlContent = null, ogData = null, cat
     model: MODEL,
     max_tokens: 1024,
 
-    system: `You are a universal content extraction specialist. Extract structured information from any web page — products, events, concerts, tickets, places, restaurants, movies, music, recipes, courses, podcasts, YouTube videos, video games, wine, articles, apps, or anything else worth saving. Always return valid JSON.`,
+    system: `You are a universal content extraction specialist. Extract structured information from any web page — products, events, concerts, tickets, places, restaurants, movies, music, recipes, courses, podcasts, YouTube videos, TikTok videos, Instagram posts, video games, wine, articles, apps, or anything else worth saving. Always return valid JSON.`,
     messages: [
       {
         role: 'user',
@@ -156,8 +156,11 @@ async function extractProductFromUrl(url, htmlContent = null, ogData = null, cat
 
   // YOUTUBE VIDEO (item_type: "youtube_video") — use artist_or_director for channel name, runtime for duration
   "channel_url": "full URL to YouTube channel (YouTube only, else null)",
-  "view_count": view count as integer (YouTube only, else null),
-  "published_date": "ISO date YYYY-MM-DD (YouTube/articles, else null)",
+  "view_count": view count as integer (YouTube/TikTok only, else null),
+  "published_date": "ISO date YYYY-MM-DD (YouTube/TikTok/Instagram/articles, else null)",
+
+  // TIKTOK VIDEO (item_type: "youtube_video") — treat like a video: use artist_or_director for creator @handle, description for caption, image_url for thumbnail, view_count for views
+  // INSTAGRAM POST (item_type: "entertainment") — use artist_or_director for the creator's @handle, description for caption, image_url for post image. If the post is clearly showcasing a specific purchasable product, use item_type: "product" instead.
 
   // VIDEO GAME (item_type: "video_game") — use platform for primary platform, publisher for publisher, genre for genre, content_rating for ESRB/PEGI
   "game_platforms": ["PS5", "Xbox Series X", "PC"] array of all platforms (games only, else null),
@@ -181,8 +184,37 @@ async function extractProductFromUrl(url, htmlContent = null, ogData = null, cat
   // APP (item_type: "app") — use brand for developer, platform for platform (iOS/Mac/Web/Android)
   "pricing_model": "free" or "paid" or "subscription" (apps only, else null),
   "app_store_url": "App Store or Google Play URL (apps only, else null)",
+
+  // REVIEWS — extract up to 5 representative customer/critic reviews if visible on the page.
+  // Include reviews with photos when image URLs are present in the HTML.
+  "reviews": [
+    {
+      "reviewer_name": "display name or null",
+      "rating": star rating as float 1.0-5.0 or null,
+      "title": "review headline or null",
+      "text": "review body text (max 300 chars) or null",
+      "date": "ISO date YYYY-MM-DD or null",
+      "verified_purchase": true or false,
+      "images": ["https://...", "https://..."] or []
+    }
+  ] or null,
   "app_category": "App Store category e.g. 'Productivity' (apps only, else null)",
   "app_version": "current version string e.g. '3.2.1' (apps only, else null)",
+
+  // DYNAMIC PAGE LAYOUT — only for item_type "general" when the item is truly novel and doesn't fit a standard category.
+  // Groups entries from the "specs" object above into named, themed sections for display.
+  // Each key in "keys" MUST be a key that exists in the "specs" object above.
+  // Use 1-3 sections with 2-4 keys each. Choose SF Symbol names that clearly match the section theme.
+  // For all other item types, set this to null.
+  "display_config": {
+    "sections": [
+      {
+        "title": "Section title e.g. 'At a Glance', 'Dimensions', 'Materials'",
+        "icon": "SF Symbol name e.g. 'info.circle', 'ruler', 'square.grid.2x2'",
+        "keys": ["Spec Key 1", "Spec Key 2"]
+      }
+    ]
+  },
 
   "confidence": 0.0-1.0
 }
@@ -660,6 +692,82 @@ async function generateDescription({ name, brand, category, specs, item_type }) 
   return text && text.length > 0 ? text.slice(0, 200) : null;
 }
 
+/**
+ * Generate 5 suggested questions a user might ask about a product.
+ * Called once at import time; questions are stored on the product row.
+ */
+async function generateSuggestedQuestions(product) {
+  const { name, brand, description, category, item_type, specs, genre, platform } = product;
+
+  const context = [
+    `Name: ${name}`,
+    brand && `Brand: ${brand}`,
+    category && `Category: ${category}`,
+    item_type && `Type: ${item_type}`,
+    genre && `Genre: ${genre}`,
+    platform && `Platform: ${platform}`,
+    description && `Description: ${description?.slice(0, 200)}`,
+    specs && Object.keys(specs).length > 0 &&
+      `Specs: ${Object.entries(specs).slice(0, 5).map(([k, v]) => `${k}: ${v}`).join(', ')}`,
+  ].filter(Boolean).join('\n');
+
+  const message = await withRetry(() => client.messages.create({
+    model: MODEL,
+    max_tokens: 256,
+    system: `You generate short, casual questions that someone saving an item might genuinely want answered. Each question gets a relevant emoji prefix. Questions should be specific to this exact item — not generic. Return a JSON array of exactly 5 question strings. No markdown, no explanation.`,
+    messages: [{
+      role: 'user',
+      content: `Generate 5 questions for this item:\n${context}\n\nReturn ONLY a JSON array of 5 strings, e.g. ["🎨 Is this available in other colours?", ...]`,
+    }],
+  }));
+
+  const text = message.content.find(b => b.type === 'text')?.text || '[]';
+  try {
+    const questions = parseJSON(text);
+    return Array.isArray(questions) ? questions.slice(0, 5) : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Stream a casual AI answer about a product to a response object via SSE.
+ * Writes `data: {"token":"..."}` lines; ends with `data: [DONE]`.
+ */
+async function streamProductAnswer(product, question, res) {
+  const { name, brand, description, category, specs, reviews, rating, reviewCount } = product;
+
+  const context = [
+    `Product: ${name}`,
+    brand && `Brand: ${brand}`,
+    category && `Category: ${category}`,
+    description && `Description: ${description?.slice(0, 300)}`,
+    specs && Object.keys(specs).length > 0 &&
+      `Specs: ${Object.entries(specs).slice(0, 6).map(([k, v]) => `${k}: ${v}`).join(', ')}`,
+    rating && `Average rating: ${rating}/5${reviewCount ? ` (${reviewCount} reviews)` : ''}`,
+    reviews?.length > 0 &&
+      `Sample reviews: ${reviews.slice(0, 2).map(r => `"${r.text?.slice(0, 100)}"`).join('; ')}`,
+  ].filter(Boolean).join('\n');
+
+  const stream = client.messages.stream({
+    model: MODEL,
+    max_tokens: 200,
+    system: `You are a helpful, casual friend answering questions about a specific product the user has saved. Keep answers short (2–3 sentences), friendly, and based only on what you know about the product. Use the product context provided. Don't say "Based on the information provided" — just answer naturally.`,
+    messages: [{
+      role: 'user',
+      content: `Product context:\n${context}\n\nQuestion: ${question}`,
+    }],
+  });
+
+  for await (const event of stream) {
+    if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
+      res.write(`data: ${JSON.stringify({ token: event.delta.text })}\n\n`);
+    }
+  }
+  res.write('data: [DONE]\n\n');
+  res.end();
+}
+
 module.exports = {
   extractProductFromUrl,
   analyzeScreenshot,
@@ -669,4 +777,6 @@ module.exports = {
   normalizeProductData,
   findRetailersForProduct,
   generateDescription,
+  generateSuggestedQuestions,
+  streamProductAnswer,
 };

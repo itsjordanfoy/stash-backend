@@ -146,15 +146,19 @@ function parseProductPage(html, url) {
 
 function extractJsonLd($) {
   const scripts = $('script[type="application/ld+json"]').toArray();
+  let productData = null;
+  const reviews = [];
+
   for (const script of scripts) {
     try {
       const data = JSON.parse($(script).html());
       const items = Array.isArray(data) ? data : [data];
       for (const item of items) {
-        if (item['@type'] === 'Product' || item['@type']?.includes('Product')) {
+        // Extract Product schema
+        if (!productData && (item['@type'] === 'Product' || item['@type']?.includes('Product'))) {
           const rawImgs = Array.isArray(item.image) ? item.image : (item.image ? [item.image] : []);
           const imgUrls = rawImgs.map(img => typeof img === 'string' ? img : img?.url || img?.contentUrl).filter(Boolean);
-          return {
+          productData = {
             name: item.name,
             brand: item.brand?.name || item.brand,
             description: item.description?.slice(0, 300),
@@ -165,13 +169,46 @@ function extractJsonLd($) {
             sku: item.sku || item.mpn,
             gtin: item.gtin13 || item.gtin8 || item.gtin,
           };
+
+          // Reviews embedded inside the Product schema
+          const embeddedReviews = Array.isArray(item.review) ? item.review : (item.review ? [item.review] : []);
+          for (const r of embeddedReviews) {
+            const parsed = parseReviewItem(r);
+            if (parsed) reviews.push(parsed);
+          }
+        }
+
+        // Standalone Review schema objects
+        if (item['@type'] === 'Review' || item['@type']?.includes('Review')) {
+          const parsed = parseReviewItem(item);
+          if (parsed) reviews.push(parsed);
         }
       }
     } catch {
       // ignore parse errors
     }
   }
-  return null;
+
+  if (!productData) return null;
+  return { ...productData, reviews: reviews.slice(0, 5) };
+}
+
+function parseReviewItem(r) {
+  const rating = r.reviewRating?.ratingValue
+    ? parseFloat(r.reviewRating.ratingValue)
+    : null;
+  const text = r.reviewBody || r.description || null;
+  const name = r.author?.name || r.author || null;
+  if (!text && !rating) return null;
+  return {
+    reviewer_name: name,
+    rating,
+    title: r.name || null,
+    text: text?.slice(0, 500) || null,
+    date: r.datePublished || null,
+    verified_purchase: false,
+    images: [],
+  };
 }
 
 function extractJsonLdPrice(item) {

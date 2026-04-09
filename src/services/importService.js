@@ -9,6 +9,105 @@ const { enrichEntertainment } = require('./omdbService');
 const CONFIDENCE_THRESHOLD = 0.75;
 const FREE_IMPORT_LIMIT = 5;
 
+// Social media hosts that block server-side scraping.
+// These are handled with a dedicated fallback path so they never fail.
+const SOCIAL_HOSTS = ['instagram.com', 'tiktok.com', 'twitter.com', 'x.com', 'pinterest.com', 'pinterest.co.uk', 'threads.net'];
+
+function isSocialUrl(url) {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return SOCIAL_HOSTS.some(h => host.includes(h));
+  } catch { return false; }
+}
+
+/**
+ * Build a minimal but valid item from a social media URL when scraping fails.
+ * Guarantees we always produce something the user can save.
+ */
+function buildSocialFallback(sourceUrl) {
+  try {
+    const { hostname, pathname } = new URL(sourceUrl);
+    const host = hostname.toLowerCase();
+    const pathParts = pathname.split('/').filter(Boolean);
+
+    // Extract @username from path when it's the first segment (not a route keyword)
+    const ROUTE_KEYWORDS = new Set(['reel', 'reels', 'p', 'watch', 'video', 'status', 'pin', 'i']);
+    const rawUsername = pathParts[0] && !ROUTE_KEYWORDS.has(pathParts[0]) ? pathParts[0] : null;
+    const username = rawUsername ? `@${rawUsername}` : null;
+
+    if (host.includes('instagram.com')) {
+      const isReel = pathname.includes('/reel');
+      return {
+        name: username ? `${username} on Instagram` : isReel ? 'Instagram Reel' : 'Instagram Post',
+        item_type: 'entertainment',
+        description: isReel ? 'Instagram Reel' : 'Instagram Post',
+        category: 'Social Media',
+        artist_or_director: username,
+        cta_label: 'View on Instagram',
+        cta_url: sourceUrl,
+        confidence: 0.8,
+      };
+    }
+    if (host.includes('tiktok.com')) {
+      return {
+        name: username ? `${username} on TikTok` : 'TikTok Video',
+        item_type: 'entertainment',
+        description: 'TikTok Video',
+        category: 'Social Media',
+        artist_or_director: username,
+        cta_label: 'Watch on TikTok',
+        cta_url: sourceUrl,
+        confidence: 0.8,
+      };
+    }
+    if (host.includes('twitter.com') || host.includes('x.com')) {
+      return {
+        name: username ? `${username} on X` : 'Post on X',
+        item_type: 'entertainment',
+        description: 'Post on X (formerly Twitter)',
+        category: 'Social Media',
+        artist_or_director: username,
+        cta_label: 'View on X',
+        cta_url: sourceUrl,
+        confidence: 0.8,
+      };
+    }
+    if (host.includes('threads.net')) {
+      return {
+        name: username ? `${username} on Threads` : 'Threads Post',
+        item_type: 'entertainment',
+        description: 'Post on Threads',
+        category: 'Social Media',
+        artist_or_director: username,
+        cta_label: 'View on Threads',
+        cta_url: sourceUrl,
+        confidence: 0.8,
+      };
+    }
+    if (host.includes('pinterest.com')) {
+      return {
+        name: 'Pinterest Pin',
+        item_type: 'general',
+        description: 'Saved from Pinterest',
+        category: 'Social Media',
+        cta_label: 'View on Pinterest',
+        cta_url: sourceUrl,
+        confidence: 0.8,
+      };
+    }
+    return {
+      name: 'Social Media Post',
+      item_type: 'entertainment',
+      category: 'Social Media',
+      cta_label: 'View Post',
+      cta_url: sourceUrl,
+      confidence: 0.8,
+    };
+  } catch {
+    return { name: 'Social Media Post', item_type: 'entertainment', category: 'Social Media', confidence: 0.8 };
+  }
+}
+
 /**
  * Detect item type from URL domain/path before calling AI,
  * so we can pass a category hint for better extraction.
@@ -26,6 +125,9 @@ function classifyUrlCategory(url) {
 
     if ((host.includes('youtube.com') && path.includes('/watch')) ||
         host.includes('youtu.be')) return 'YouTube Video';
+
+    if (host.includes('tiktok.com')) return 'TikTok Video';
+    if (host.includes('instagram.com')) return 'Instagram Post';
 
     if (host.includes('podcasts.apple.com') ||
         (host.includes('spotify.com') && path.includes('/show'))) return 'Podcast';
@@ -84,12 +186,42 @@ async function processImport(importId, { userId, sourceType, sourceUrl, screensh
       }
     } else if (sourceType === 'social') {
       const socialProducts = await aiService.analyzeSocialLink(sourceUrl);
-      if (socialProducts.length === 0) {
-        await markFailed(importId, 'No products detected in social media content');
-        return;
+      if (socialProducts.length > 0) {
+        // Take highest confidence suggestion
+        extractedData = socialProducts.sort((a, b) => b.confidence - a.confidence)[0];
+      } else {
+        // Fall back to full scraping pipeline instead of hard-failing
+        const pageResult = await scraperService.fetchPage(sourceUrl);
+        const ogData = await scraperService.extractOpenGraph(sourceUrl, pageResult?.html || null);
+        const urlCategory = classifyUrlCategory(sourceUrl);
+        extractedData = await aiService.extractProductFromUrl(sourceUrl, pageResult?.html, ogData, urlCategory);
       }
-      // Take highest confidence suggestion
-      extractedData = socialProducts.sort((a, b) => b.confidence - a.confidence)[0];
+    } else if (isSocialUrl(sourceUrl)) {
+      // Social media URLs (Instagram, TikTok, Twitter, Pinterest) block server-side scraping.
+      // Try OG extraction directly — public posts usually expose OG tags.
+      // If that fails, build a guaranteed minimal item from the URL structure.
+      const urlCategory = classifyUrlCategory(sourceUrl);
+      const ogData = await scraperService.extractOpenGraph(sourceUrl, null).catch(() => null);
+
+      if (ogData && (ogData.title || ogData.image)) {
+        // OG worked — use AI to enrich, but always floor confidence at 0.8
+        const aiResult = await aiService.extractProductFromUrl(sourceUrl, null, ogData, urlCategory).catch(() => null);
+        if (aiResult && aiResult.confidence >= 0.4) {
+          extractedData = aiResult;
+        } else {
+          // AI couldn't help — use OG data directly
+          extractedData = buildSocialFallback(sourceUrl);
+          if (ogData.title) extractedData.name = ogData.title;
+          if (ogData.description) extractedData.description = ogData.description;
+          if (ogData.image) extractedData.image_url = ogData.image;
+        }
+        // Guarantee confidence — the user deliberately shared this link
+        extractedData.confidence = Math.max(extractedData.confidence || 0, 0.8);
+        if (ogData.image && !extractedData.image_url) extractedData.image_url = ogData.image;
+      } else {
+        // OG failed — use URL structure to build a minimal but valid item
+        extractedData = buildSocialFallback(sourceUrl);
+      }
     } else {
       // link import — fetch page first, then extract OG from same HTML (avoids double request)
       const pageResult = await scraperService.fetchPage(sourceUrl);
@@ -123,6 +255,14 @@ async function processImport(importId, { userId, sourceType, sourceUrl, screensh
       );
 
       // Merge AI result with scraped data
+      // Reviews: prefer AI-extracted (richer text), fall back to JSON-LD scraped
+      const mergedReviews = (() => {
+        const aiRevs = Array.isArray(extractedData.reviews) ? extractedData.reviews : [];
+        const scrapedRevs = Array.isArray(rawPageData.reviews) ? rawPageData.reviews : [];
+        const combined = aiRevs.length > 0 ? aiRevs : scrapedRevs;
+        return combined.slice(0, 5);
+      })();
+
       extractedData = {
         ...rawPageData,
         ...extractedData,
@@ -136,6 +276,7 @@ async function processImport(importId, { userId, sourceType, sourceUrl, screensh
             ...(rawPageData.image_url ? [rawPageData.image_url] : []),
           ])
         ].filter(Boolean).slice(0, 8),
+        reviews: mergedReviews.length > 0 ? mergedReviews : null,
       };
 
       // Ensure all image URLs are absolute, HTTPS, and clean
@@ -207,7 +348,10 @@ async function processImport(importId, { userId, sourceType, sourceUrl, screensh
     }
 
     if (!extractedData || extractedData.confidence < 0.2) {
-      await markFailed(importId, 'Could not identify anything in this content. Try sharing a more specific link or screenshot.');
+      const failMsg = sourceUrl
+        ? 'We couldn\'t extract enough information from this link. Try sharing a screenshot of the page instead.'
+        : 'Could not identify anything from this content. Try sharing a screenshot instead.'
+      await markFailed(importId, failMsg);
       return;
     }
 
@@ -244,6 +388,13 @@ async function processImport(importId, { userId, sourceType, sourceUrl, screensh
     if (extractedData.confidence >= CONFIDENCE_THRESHOLD) {
       // High confidence, no existing → create product and complete
       const productId = await createProduct(extractedData, sourceUrl, sourceType);
+      // Fire-and-forget: generate suggested questions for this product
+      aiService.generateSuggestedQuestions(extractedData).then(questions => {
+        if (Array.isArray(questions) && questions.length > 0) {
+          query('UPDATE products SET suggested_questions = $1 WHERE id = $2',
+            [JSON.stringify(questions), productId]).catch(() => {});
+        }
+      }).catch(() => {});
       await finaliseImport(importId, userId, productId, sourceUrl, sourceType, screenshotKey);
       return;
     }
@@ -284,6 +435,13 @@ async function confirmImport(importId, userId, confirmedData) {
     productId = confirmedData.product_id;
   } else {
     productId = await createProduct(confirmedData, importRecord.source_url, importRecord.source_type);
+    // Fire-and-forget: generate suggested questions for this product
+    aiService.generateSuggestedQuestions(confirmedData).then(questions => {
+      if (Array.isArray(questions) && questions.length > 0) {
+        query('UPDATE products SET suggested_questions = $1 WHERE id = $2',
+          [JSON.stringify(questions), productId]).catch(() => {});
+      }
+    }).catch(() => {});
   }
 
   await finaliseImport(
@@ -336,13 +494,14 @@ async function createProduct(data, sourceUrl, sourceType) {
          wine_region, grape_variety, abv, tasting_notes, food_pairing,
          publication_name, read_time_minutes, word_count, article_tags,
          pricing_model, app_store_url, app_category, app_version,
-         phone, rating, review_count
+         phone, rating, review_count, reviews,
+         display_config
        )
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,
                $23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,
                $42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,$55,$56,
                $57,$58,$59,$60,$61,$62,$63,$64,$65,$66,$67,$68,$69,$70,$71,$72,$73,$74,$75,
-               $76,$77,$78,$79,$80,$81,$82,$83,$84,$85,$86)
+               $76,$77,$78,$79,$80,$81,$82,$83,$84,$85,$86,$87,$88)
        ON CONFLICT (canonical_id) DO UPDATE
          SET name      = EXCLUDED.name,
              image_url = COALESCE(EXCLUDED.image_url, products.image_url),
@@ -437,6 +596,8 @@ async function createProduct(data, sourceUrl, sourceType) {
         data.phone || null,                // $84
         data.rating || null,               // $85
         data.review_count || null,         // $86
+        data.reviews ? JSON.stringify(data.reviews) : null, // $87
+        data.display_config ? JSON.stringify(data.display_config) : null, // $88
       ]
     );
     const productId = productResult.rows[0].id;
@@ -533,6 +694,14 @@ function sanitizeErrorMessage(error) {
   if (/401|403|invalid.*key|api.*key/i.test(msg)) {
     return 'Import failed. Please try again.';
   }
+  // Hide raw database errors — these are internal and should never reach the user
+  if (/column .* of relation|relation .* does not exist|violates check constraint|duplicate key|syntax error at or near|ERROR:.*postgres/i.test(msg)) {
+    return 'Import failed. Please try again.';
+  }
+  // Sanitise any old "No products detected" messages that may still be in the DB
+  if (/no products detected|social media content/i.test(msg)) {
+    return 'We couldn\'t extract enough information from this link. Try sharing a screenshot instead.';
+  }
   // If it looks like raw JSON or an HTTP error body, replace with generic message
   if (msg.startsWith('{') || msg.startsWith('[') || /^\d{3}\s+\{/.test(msg)) {
     return 'Import failed. Please try again.';
@@ -569,7 +738,7 @@ async function getImportStatus(importId, userId) {
     status: row.status,
     source_type: row.source_type,
     suggestions: row.suggestions,
-    error: row.error,
+    error: row.error ? sanitizeErrorMessage(row.error) : null,
     product: row.product_id
       ? { id: row.product_id, name: row.product_name, image_url: row.image_url }
       : null,
