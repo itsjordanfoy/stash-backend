@@ -724,7 +724,7 @@ function sanitizeErrorMessage(error) {
     return 'Import failed. Please try again.';
   }
   // Hide raw database errors — these are internal and should never reach the user
-  if (/column .* of relation|relation .* does not exist|violates check constraint|duplicate key|syntax error at or near|ERROR:.*postgres/i.test(msg)) {
+  if (/column .* of relation|relation .* does not exist|violates check constraint|duplicate key|syntax error at or near|ERROR:.*postgres|value too long|character varying/i.test(msg)) {
     return 'Import failed. Please try again.';
   }
   // Sanitise any old "No products detected" messages that may still be in the DB

@@ -29,6 +29,32 @@ async function testConnection() {
 }
 
 /**
+ * Widen a column to TEXT using information_schema to check first.
+ * Logs clearly on success or failure — never silently swallows errors.
+ */
+async function widenToText(client, table, col) {
+  try {
+    const res = await client.query(
+      `SELECT data_type, character_maximum_length
+       FROM information_schema.columns
+       WHERE table_name = $1 AND column_name = $2`,
+      [table, col]
+    );
+    if (res.rows.length === 0) {
+      // Column doesn't exist yet — will be added by ADD COLUMN below
+      return;
+    }
+    const { data_type, character_maximum_length } = res.rows[0];
+    if (data_type === 'character varying') {
+      await client.query(`ALTER TABLE ${table} ALTER COLUMN ${col} TYPE TEXT`);
+      logger.info(`Migration: widened ${table}.${col} from VARCHAR(${character_maximum_length}) to TEXT`);
+    }
+  } catch (err) {
+    logger.error(`Migration: failed to widen ${table}.${col}: ${err.message}`);
+  }
+}
+
+/**
  * Run idempotent schema migrations on startup.
  * All statements use ADD COLUMN IF NOT EXISTS / DROP CONSTRAINT IF EXISTS
  * so they are safe to re-run on every deploy.
@@ -36,7 +62,26 @@ async function testConnection() {
 async function runMigrations() {
   const client = await pool.connect();
   try {
-    // All columns added after initial schema — safe to re-run (IF NOT EXISTS)
+    // ── Step 1: Widen any VARCHAR columns that have restrictive length limits.
+    //    Done BEFORE adding new columns so nothing blocks later steps.
+    const toWiden = [
+      // VARCHAR(20) columns that can overflow with real-world AI-generated values
+      ['products', 'item_type'],
+      ['products', 'runtime'],
+      ['products', 'content_rating'],
+      ['products', 'difficulty'],
+      ['products', 'pricing_model'],
+      ['products', 'isbn'],
+      // VARCHAR(10) — imdb_score values like "7.8 (1.2M)" can exceed 10 chars
+      ['products', 'imdb_score'],
+      // VARCHAR(50) — app_version can be long (e.g. "2024.4.1 (build 12345)")
+      ['products', 'app_version'],
+    ];
+    for (const [table, col] of toWiden) {
+      await widenToText(client, table, col);
+    }
+
+    // ── Step 2: Add any missing columns (IF NOT EXISTS = safe to re-run)
     const cols = [
       `ALTER TABLE products ADD COLUMN IF NOT EXISTS phone TEXT`,
       `ALTER TABLE products ADD COLUMN IF NOT EXISTS rating NUMERIC(3,2)`,
@@ -91,14 +136,7 @@ async function runMigrations() {
       await client.query(sql);
     }
 
-    // Widen short VARCHAR columns that were originally created with VARCHAR(20) limits.
-    // These can overflow for realistic values (e.g. "2 hours 30 minutes", "Beginner-Friendly").
-    const widenCols = ['runtime', 'content_rating', 'difficulty', 'pricing_model', 'isbn', 'item_type'];
-    for (const col of widenCols) {
-      await client.query(`ALTER TABLE products ALTER COLUMN ${col} TYPE TEXT`).catch(() => {/* col may not exist yet — safe to ignore */});
-    }
-
-    // Widen item_type constraint to cover all supported types
+    // ── Step 3: Widen item_type constraint to cover all supported types
     await client.query(`ALTER TABLE products DROP CONSTRAINT IF EXISTS products_item_type_check`);
     await client.query(`
       ALTER TABLE products ADD CONSTRAINT products_item_type_check
