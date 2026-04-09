@@ -91,6 +91,13 @@ async function runMigrations() {
       await client.query(sql);
     }
 
+    // Widen short VARCHAR columns that were originally created with VARCHAR(20) limits.
+    // These can overflow for realistic values (e.g. "2 hours 30 minutes", "Beginner-Friendly").
+    const widenCols = ['runtime', 'content_rating', 'difficulty', 'pricing_model', 'isbn', 'item_type'];
+    for (const col of widenCols) {
+      await client.query(`ALTER TABLE products ALTER COLUMN ${col} TYPE TEXT`).catch(() => {/* col may not exist yet — safe to ignore */});
+    }
+
     // Widen item_type constraint to cover all supported types
     await client.query(`ALTER TABLE products DROP CONSTRAINT IF EXISTS products_item_type_check`);
     await client.query(`

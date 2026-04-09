@@ -21,6 +21,27 @@ function isSocialUrl(url) {
 }
 
 /**
+ * Clean up a social media item name.
+ * Instagram OG titles are typically: "Username · platform on Instagram: 'caption…'"
+ * We strip the "on Instagram/TikTok/etc: '…'" suffix and any leading @-handle clutter.
+ * If the result is still just a generic fallback, we return null so the caller can skip it.
+ */
+function sanitizeSocialName(name, platform) {
+  if (!name) return null;
+  // Strip "on Instagram: 'caption...'" pattern — keep only what's before it
+  let cleaned = name
+    .replace(/\s+on\s+instagram[^]*$/i, '')
+    .replace(/\s+on\s+tiktok[^]*$/i, '')
+    .replace(/\s+on\s+x[^]*$/i, '')
+    .replace(/\s+on\s+threads[^]*$/i, '')
+    .trim();
+  // Also strip a raw caption that leaked through (starts with quote/emoji run without a real subject)
+  // If cleaned is just a username handle like "@foo" keep it for the fallback to handle
+  if (!cleaned || cleaned.length > 120) return null;
+  return cleaned;
+}
+
+/**
  * Build a minimal but valid item from a social media URL when scraping fails.
  * Guarantees we always produce something the user can save.
  */
@@ -215,9 +236,17 @@ async function processImport(importId, { userId, sourceType, sourceUrl, screensh
           if (ogData.description) extractedData.description = ogData.description;
           if (ogData.image) extractedData.image_url = ogData.image;
         }
+        // Clean up messy social names (e.g. Instagram OG titles include full captions)
+        const cleanedName = sanitizeSocialName(extractedData.name, sourceUrl);
+        if (cleanedName) extractedData.name = cleanedName;
         // Guarantee confidence — the user deliberately shared this link
         extractedData.confidence = Math.max(extractedData.confidence || 0, 0.8);
-        if (ogData.image && !extractedData.image_url) extractedData.image_url = ogData.image;
+        // Use OG image as fallback only when AI didn't find one.
+        // For Instagram reels the OG image is the video thumbnail (may include a baked-in play
+        // button overlay). If the AI already resolved a better image, keep that instead.
+        if (ogData.image && !extractedData.image_url) {
+          extractedData.image_url = ogData.image;
+        }
       } else {
         // OG failed — use URL structure to build a minimal but valid item
         extractedData = buildSocialFallback(sourceUrl);
