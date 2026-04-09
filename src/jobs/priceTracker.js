@@ -21,7 +21,7 @@ async function runPriceTrackingJob() {
     // Scrape ALL product retailers that are due a check.
     // Tracking status only controls notifications — prices should always be kept current.
     const retailersResult = await query(
-      `SELECT DISTINCT pr.id, pr.product_id, pr.product_url, pr.retailer_name,
+      `SELECT pr.id, pr.product_id, pr.product_url, pr.retailer_name,
               pr.current_price, pr.currency
        FROM product_retailers pr
        WHERE (pr.last_checked IS NULL OR pr.last_checked < NOW() - INTERVAL '23 hours')
