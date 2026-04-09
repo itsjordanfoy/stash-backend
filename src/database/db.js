@@ -36,12 +36,60 @@ async function testConnection() {
 async function runMigrations() {
   const client = await pool.connect();
   try {
-    // New columns added after initial schema
-    await client.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS phone TEXT`);
-    await client.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS rating NUMERIC(3,2)`);
-    await client.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS review_count INTEGER`);
-    await client.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS suggested_questions JSONB`);
-    await client.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS display_config JSONB`);
+    // All columns added after initial schema — safe to re-run (IF NOT EXISTS)
+    const cols = [
+      `ALTER TABLE products ADD COLUMN IF NOT EXISTS phone TEXT`,
+      `ALTER TABLE products ADD COLUMN IF NOT EXISTS rating NUMERIC(3,2)`,
+      `ALTER TABLE products ADD COLUMN IF NOT EXISTS review_count INTEGER`,
+      `ALTER TABLE products ADD COLUMN IF NOT EXISTS suggested_questions JSONB`,
+      `ALTER TABLE products ADD COLUMN IF NOT EXISTS display_config JSONB`,
+      `ALTER TABLE products ADD COLUMN IF NOT EXISTS reviews JSONB`,
+      `ALTER TABLE products ADD COLUMN IF NOT EXISTS imdb_score TEXT`,
+      `ALTER TABLE products ADD COLUMN IF NOT EXISTS rotten_tomatoes_score INTEGER`,
+      `ALTER TABLE products ADD COLUMN IF NOT EXISTS awards JSONB`,
+      `ALTER TABLE products ADD COLUMN IF NOT EXISTS streaming_links JSONB`,
+      `ALTER TABLE products ADD COLUMN IF NOT EXISTS cast_with_photos JSONB`,
+      `ALTER TABLE products ADD COLUMN IF NOT EXISTS book_editions JSONB`,
+      `ALTER TABLE products ADD COLUMN IF NOT EXISTS book_awards JSONB`,
+      `ALTER TABLE products ADD COLUMN IF NOT EXISTS tour_dates JSONB`,
+      `ALTER TABLE products ADD COLUMN IF NOT EXISTS spotify_url TEXT`,
+      `ALTER TABLE products ADD COLUMN IF NOT EXISTS apple_music_url TEXT`,
+      `ALTER TABLE products ADD COLUMN IF NOT EXISTS price_range INTEGER`,
+      `ALTER TABLE products ADD COLUMN IF NOT EXISTS menu_url TEXT`,
+      `ALTER TABLE products ADD COLUMN IF NOT EXISTS weather_forecast JSONB`,
+      `ALTER TABLE products ADD COLUMN IF NOT EXISTS nutrition JSONB`,
+      `ALTER TABLE products ADD COLUMN IF NOT EXISTS difficulty TEXT`,
+      `ALTER TABLE products ADD COLUMN IF NOT EXISTS course_instructor TEXT`,
+      `ALTER TABLE products ADD COLUMN IF NOT EXISTS course_duration_hours NUMERIC`,
+      `ALTER TABLE products ADD COLUMN IF NOT EXISTS course_modules_count INTEGER`,
+      `ALTER TABLE products ADD COLUMN IF NOT EXISTS certificate_available BOOLEAN`,
+      `ALTER TABLE products ADD COLUMN IF NOT EXISTS podcast_network TEXT`,
+      `ALTER TABLE products ADD COLUMN IF NOT EXISTS episode_count INTEGER`,
+      `ALTER TABLE products ADD COLUMN IF NOT EXISTS latest_episode_title TEXT`,
+      `ALTER TABLE products ADD COLUMN IF NOT EXISTS published_date DATE`,
+      `ALTER TABLE products ADD COLUMN IF NOT EXISTS channel_url TEXT`,
+      `ALTER TABLE products ADD COLUMN IF NOT EXISTS view_count BIGINT`,
+      `ALTER TABLE products ADD COLUMN IF NOT EXISTS game_platforms JSONB`,
+      `ALTER TABLE products ADD COLUMN IF NOT EXISTS metacritic_score INTEGER`,
+      `ALTER TABLE products ADD COLUMN IF NOT EXISTS playtime_estimate TEXT`,
+      `ALTER TABLE products ADD COLUMN IF NOT EXISTS studio TEXT`,
+      `ALTER TABLE products ADD COLUMN IF NOT EXISTS wine_region TEXT`,
+      `ALTER TABLE products ADD COLUMN IF NOT EXISTS grape_variety TEXT`,
+      `ALTER TABLE products ADD COLUMN IF NOT EXISTS abv NUMERIC`,
+      `ALTER TABLE products ADD COLUMN IF NOT EXISTS tasting_notes TEXT`,
+      `ALTER TABLE products ADD COLUMN IF NOT EXISTS food_pairing JSONB`,
+      `ALTER TABLE products ADD COLUMN IF NOT EXISTS publication_name TEXT`,
+      `ALTER TABLE products ADD COLUMN IF NOT EXISTS read_time_minutes INTEGER`,
+      `ALTER TABLE products ADD COLUMN IF NOT EXISTS word_count INTEGER`,
+      `ALTER TABLE products ADD COLUMN IF NOT EXISTS article_tags JSONB`,
+      `ALTER TABLE products ADD COLUMN IF NOT EXISTS pricing_model TEXT`,
+      `ALTER TABLE products ADD COLUMN IF NOT EXISTS app_store_url TEXT`,
+      `ALTER TABLE products ADD COLUMN IF NOT EXISTS app_category TEXT`,
+      `ALTER TABLE products ADD COLUMN IF NOT EXISTS app_version TEXT`,
+    ];
+    for (const sql of cols) {
+      await client.query(sql);
+    }
 
     // Widen item_type constraint to cover all supported types
     await client.query(`ALTER TABLE products DROP CONSTRAINT IF EXISTS products_item_type_check`);
