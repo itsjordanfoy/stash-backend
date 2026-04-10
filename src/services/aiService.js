@@ -100,11 +100,11 @@ async function extractProductFromUrl(url, htmlContent = null, ogData = null, cat
   "isbn": "ISBN for books (else null)",
   "platform": "platform for games/apps/courses e.g. 'PlayStation 5', 'iOS', 'Udemy' (else null)",
 
-  "runtime": "runtime in format 'Xh Ym' e.g. '2h 15m' (movies/TV only, else null)",
-  "content_rating": "content/age rating e.g. 'PG', '12A', 'R', 'U' (movies/TV only, else null)",
+  "runtime": "runtime in SHORT format ONLY e.g. '2h 15m', '45m', '1h 30m' — never spell out 'hours' or 'minutes' (movies/TV/YouTube/podcasts, else null)",
+  "content_rating": "SHORT rating code only e.g. 'PG', '12A', 'R', 'U', 'PEGI 18', 'M' — max 10 chars (movies/TV/games, else null)",
   "cast_members": ["Actor Name", "Actor Name"] up to 6 main cast members (movies/TV only, else null),
   "trailer_url": "YouTube or Apple TV trailer URL if present on the page, else null",
-  "imdb_score": "IMDb score as string e.g. '8.3/10' (movies/TV only, else null)",
+  "imdb_score": "IMDb score SHORT format e.g. '8.3' or '8.3/10' — do NOT include vote counts (movies/TV only, else null)",
   "rotten_tomatoes_score": "Rotten Tomatoes critic score as integer 0-100 (movies/TV only, else null)",
   "awards": ["Award Name 1", "Award Name 2"] array of notable awards won e.g. "Academy Award Winner", "Palme d'Or", "Booker Prize", "Pulitzer Prize" (movies/TV/books only, else null),
   "streaming_links": {"Netflix": "https://...", "Disney+": "https://..."} object mapping streaming service name to direct URL (movies/TV only, else null),
@@ -160,7 +160,7 @@ async function extractProductFromUrl(url, htmlContent = null, ogData = null, cat
   "published_date": "ISO date YYYY-MM-DD (YouTube/TikTok/Instagram/articles, else null)",
 
   // TIKTOK VIDEO (item_type: "youtube_video") — treat like a video: use artist_or_director for creator @handle, description for caption, image_url for thumbnail, view_count for views
-  // INSTAGRAM POST (item_type: "entertainment") — use artist_or_director for the creator's @handle, description for caption, image_url for post image. If the post is clearly showcasing a specific purchasable product, use item_type: "product" instead.
+  // INSTAGRAM POST (item_type: "entertainment") — extract the ACTUAL SUBJECT as the name (e.g. restaurant name, product name, place name shown in the caption/image). Do NOT use the Instagram OG title format ("X on Instagram: 'caption...'"). Use artist_or_director for the creator's @handle, description for a clean 1-sentence caption summary, image_url for post image. If the post is clearly showcasing a specific purchasable product, use item_type: "product" instead. If it's about a place/restaurant, use item_type: "place" and fill in address/location fields if visible.
 
   // VIDEO GAME (item_type: "video_game") — use platform for primary platform, publisher for publisher, genre for genre, content_rating for ESRB/PEGI
   "game_platforms": ["PS5", "Xbox Series X", "PC"] array of all platforms (games only, else null),
@@ -281,11 +281,11 @@ async function analyzeScreenshot(imageBase64, mimeType = 'image/png') {
   "isbn": "ISBN for books (else null)",
   "platform": "platform for games/apps/courses e.g. 'PlayStation 5', 'iOS', 'Udemy' (else null)",
 
-  "runtime": "runtime in format 'Xh Ym' e.g. '2h 15m' if visible (movies/TV only, else null)",
-  "content_rating": "content/age rating e.g. 'PG', '12A', 'R', 'U' if visible (movies/TV only, else null)",
+  "runtime": "runtime SHORT format ONLY e.g. '2h 15m', '45m' — never spell out 'hours' or 'minutes' (movies/TV/YouTube/podcasts, else null)",
+  "content_rating": "SHORT rating code only e.g. 'PG', '12A', 'R', 'PEGI 18', 'M' — max 10 chars (movies/TV/games, else null)",
   "cast_members": ["Actor Name"] up to 6 main cast members if visible (movies/TV only, else null),
   "trailer_url": null,
-  "imdb_score": "IMDb score as string e.g. '8.3/10' if visible (movies/TV only, else null)",
+  "imdb_score": "IMDb score SHORT e.g. '8.3' or '8.3/10' — no vote counts (movies/TV only, else null)",
   "rotten_tomatoes_score": "Rotten Tomatoes critic score as integer 0-100 if visible (movies/TV only, else null)",
   "awards": ["Award Name 1"] array of notable awards won if visible (movies/TV/books only, else null),
   "streaming_links": null,
