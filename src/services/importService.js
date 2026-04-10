@@ -722,6 +722,59 @@ async function processImport(importId, { userId, sourceType, sourceUrl, screensh
       }
     }
 
+    // ── Tier 4: Screenshot API fallback ─────────────────────────────────
+    // If URL inference ALSO failed (truly obscure URL we don't recognise),
+    // capture a server-side screenshot and run it through the vision pipeline.
+    // This is the "always works" tier — it reuses the same analyzeScreenshot()
+    // function that powers the user's manual screenshot import flow.
+    // Requires SCREENSHOT_API_KEY env var; silently skipped otherwise.
+    if (sourceUrl && (!extractedData || extractedData.confidence < 0.2)) {
+      logger.info('All text-based tiers failed — trying screenshot API fallback', { sourceUrl });
+      try {
+        const shot = await scraperService.captureScreenshot(sourceUrl);
+        if (shot?.base64) {
+          const visionData = await aiService.analyzeScreenshot(shot.base64, shot.mimeType);
+          if (visionData && visionData.name && (visionData.confidence ?? 0) >= 0.3) {
+            logger.info('Screenshot-fallback succeeded', {
+              sourceUrl,
+              name: visionData.name,
+              confidence: visionData.confidence,
+            });
+            extractedData = {
+              ...(extractedData || {}),
+              ...visionData,
+            };
+            // Final OG image attempt in case screenshot-AI didn't return one
+            if (!extractedData.image_url) {
+              const fallbackImg = await scraperService.fetchOGImage(sourceUrl).catch(() => null);
+              if (fallbackImg) {
+                extractedData.image_url = fallbackImg;
+                extractedData.images = [fallbackImg];
+              }
+            }
+            // Upload to S3
+            if (extractedData.image_url) {
+              const s3Result = await uploadProductImages(
+                extractedData.image_url,
+                extractedData.images || []
+              ).catch(() => null);
+              if (s3Result) {
+                extractedData.image_url = s3Result.imageUrl || extractedData.image_url;
+                extractedData.images = s3Result.images.length > 0 ? s3Result.images : extractedData.images;
+              }
+            }
+          } else {
+            logger.warn('Screenshot vision returned low confidence', {
+              sourceUrl,
+              confidence: visionData?.confidence,
+            });
+          }
+        }
+      } catch (err) {
+        logger.warn('Screenshot fallback failed', { sourceUrl, error: err.message });
+      }
+    }
+
     if (!extractedData || extractedData.confidence < 0.2) {
       const failMsg = sourceUrl
         ? 'We couldn\'t extract enough information from this link. Try sharing a screenshot of the page instead.'
@@ -1053,6 +1106,15 @@ async function findExistingProduct(data) {
 
 async function markFailed(importId, error) {
   const message = sanitizeErrorMessage(error);
+  // Log the RAW error alongside the sanitised version so Railway logs show us
+  // what actually happened without leaking internal details to end users.
+  const rawMsg = typeof error === 'string' ? error : (error?.message || String(error));
+  logger.error('Import marked failed', {
+    importId,
+    sanitised: message,
+    raw: rawMsg.slice(0, 500),
+    stack: error?.stack?.slice(0, 500),
+  });
   await query(
     `UPDATE import_queue SET status = 'failed', error = $1 WHERE id = $2`,
     [message, importId]

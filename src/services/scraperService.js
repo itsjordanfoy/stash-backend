@@ -609,6 +609,72 @@ async function fetchPlatformImages(url) {
   return [];
 }
 
+/**
+ * SCREENSHOT-API FALLBACK
+ * ───────────────────────
+ * Last-resort tool for URLs we can't scrape (bot-blocked, JS-rendered, etc.)
+ * and can't identify from world knowledge. Uses ScreenshotOne to render the
+ * page server-side and returns a base64 PNG the AI vision pipeline can read.
+ *
+ * Configure with SCREENSHOT_API_KEY (from screenshotone.com). If no key is
+ * set, this function returns null immediately so the pipeline falls through
+ * to the existing failure message.
+ *
+ * Docs: https://screenshotone.com/docs/
+ */
+async function captureScreenshot(url) {
+  const apiKey = process.env.SCREENSHOT_API_KEY;
+  if (!apiKey) {
+    logger.debug('captureScreenshot skipped — no SCREENSHOT_API_KEY');
+    return null;
+  }
+
+  try {
+    const params = new URLSearchParams({
+      access_key: apiKey,
+      url,
+      format: 'png',
+      viewport_width: '1280',
+      viewport_height: '1600',
+      full_page: 'false',
+      block_cookie_banners: 'true',
+      block_ads: 'true',
+      block_banners_by_heuristics: 'true',
+      device_scale_factor: '1',
+      image_quality: '80',
+      cache: 'true',
+      cache_ttl: '2592000', // 30 days — same page = same screenshot
+      response_type: 'by_format',
+      timeout: '30',
+    });
+
+    const apiUrl = `https://api.screenshotone.com/take?${params.toString()}`;
+    logger.info('Capturing screenshot', { url });
+
+    const r = await axios.get(apiUrl, {
+      responseType: 'arraybuffer',
+      timeout: 45000,
+      validateStatus: s => s < 500,
+    });
+
+    if (r.status !== 200) {
+      logger.warn('ScreenshotOne returned non-200', {
+        url,
+        status: r.status,
+        body: Buffer.from(r.data).toString('utf8').slice(0, 200),
+      });
+      return null;
+    }
+
+    const base64 = Buffer.from(r.data).toString('base64');
+    logger.info('Screenshot captured', { url, bytes: r.data.length });
+    return { base64, mimeType: 'image/png' };
+  } catch (err) {
+    logger.warn('Screenshot capture failed', { url, error: err.message });
+    return null;
+  }
+}
+
 module.exports = {
   fetchPage,
   extractOpenGraph,
@@ -619,4 +685,5 @@ module.exports = {
   detectSourceType,
   scrapeRetailerPrice,
   isSameProduct,
+  captureScreenshot,
 };
