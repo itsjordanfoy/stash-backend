@@ -237,6 +237,80 @@ ${context}`,
 }
 
 /**
+ * URL INFERENCE FALLBACK
+ * ──────────────────────
+ * Called when the scraper returns nothing useful (bot-blocked, JS-rendered,
+ * empty page, etc.). Explicitly tells Claude to use its world knowledge —
+ * many major sites have recognisable URL structures (Amazon ASINs, IMDb IDs,
+ * IKEA product names, Goodreads book IDs, etc.) that Claude already knows about.
+ *
+ * Returns the same shape as extractProductFromUrl so the pipeline can merge it
+ * back in. The prompt pushes Claude to NOT be over-cautious: if it has any
+ * reasonable guess, it should provide it rather than bail out.
+ */
+async function inferFromUrl(url) {
+  const message = await withRetry(() => client.messages.create({
+    model: MODEL,
+    max_tokens: 1024,
+
+    system: `You are a URL-recognition specialist. You identify web pages from their URL alone using your extensive world knowledge of how major sites structure their URLs. You do NOT have the HTML — just the URL. Your job is to make an informed guess about what the page is, so the user can save it to their library.`,
+    messages: [
+      {
+        role: 'user',
+        content: `I need to identify what this page is about from its URL alone. No scraping was possible (the site blocks bots or renders content in JavaScript).
+
+URL: ${url}
+
+Use your knowledge of this domain and URL structure. Known patterns include:
+- amazon.com/dp/ASIN — specific Amazon products (you know many ASINs)
+- imdb.com/title/tt_ID — films and TV shows (you know the famous ones)
+- ikea.com/.../product-name-numeric_id — the URL slug contains the product name
+- goodreads.com/book/show/ID.Book_Title — the slug contains the title
+- bbcgoodfood.com/recipes/slug — the slug is the recipe name
+- Many news/blog URLs contain the article title in the slug
+
+Extract whatever you can reasonably infer from the URL slug, path, and domain knowledge. Return a JSON object in this exact shape:
+
+{
+  "name": "SHORT name — max 50 chars. Infer from URL slug if nothing else. For Amazon ASINs, use the product name you remember. For IMDb, use the film title. Never include the site name.",
+  "item_type": "product" | "place" | "entertainment" | "event" | "general" | "course" | "podcast" | "youtube_video" | "video_game" | "wine" | "article" | "app",
+  "brand": "brand or publisher (else null)",
+  "description": "brief description — what you know about this page (max 200 chars)",
+  "category": "best-guess category",
+  "retailer_name": "domain-friendly site name (e.g. 'Amazon', 'IMDb', 'IKEA')",
+  "confidence": 0.0-1.0
+}
+
+IMPORTANT:
+- Be CONFIDENT. If the URL slug clearly spells out the item (e.g. "best-spaghetti-bolognese-recipe"), set confidence to 0.6+.
+- For well-known sites where you recognise the URL pattern, set confidence to 0.7+.
+- Only use confidence below 0.3 if the URL is truly opaque (random IDs, hash fragments).
+- ALWAYS return a name — use the best inference from the URL slug. Never return null for name.
+- Return ONLY the JSON object, no markdown.`,
+      },
+    ],
+  }));
+
+  const text = message.content.find(b => b.type === 'text')?.text || '{}';
+  try {
+    const parsed = parseJSON(text);
+    // Safety net — if the AI bailed with null/empty name, fall back to the URL slug itself
+    if (!parsed.name) {
+      try {
+        const u = new URL(url);
+        const lastSegment = u.pathname.split('/').filter(Boolean).pop() || u.hostname;
+        parsed.name = lastSegment.replace(/[-_]/g, ' ').replace(/\.(html?|php)$/i, '').slice(0, 50);
+        parsed.confidence = Math.max(parsed.confidence || 0, 0.3);
+      } catch { /* ignore */ }
+    }
+    return parsed;
+  } catch {
+    logger.warn('Failed to parse AI URL inference response', { text });
+    return { confidence: 0 };
+  }
+}
+
+/**
  * Analyse a screenshot (base64) and extract product information using vision.
  */
 async function analyzeScreenshot(imageBase64, mimeType = 'image/png') {
@@ -770,6 +844,7 @@ async function streamProductAnswer(product, question, res) {
 
 module.exports = {
   extractProductFromUrl,
+  inferFromUrl,
   analyzeScreenshot,
   matchProduct,
   generateAlternatives,

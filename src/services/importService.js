@@ -673,6 +673,55 @@ async function processImport(importId, { userId, sourceType, sourceUrl, screensh
       extractedData.name = extractedData.name.slice(0, 77).trimEnd() + '…';
     }
 
+    // ── URL inference fallback ──────────────────────────────────────────
+    // When scraping fails (bot-blocked sites, JS-rendered pages, empty HTML)
+    // the AI extraction returns low confidence. Try one more pass using ONLY
+    // the URL — Claude's world knowledge can identify many major sites
+    // (Amazon ASINs, IMDb IDs, IKEA product slugs, Goodreads books, etc.)
+    // purely from the URL structure.
+    if (sourceUrl && (!extractedData || extractedData.confidence < 0.2)) {
+      logger.info('Low-confidence extraction — trying URL inference fallback', { sourceUrl });
+      try {
+        const inferred = await aiService.inferFromUrl(sourceUrl);
+        if (inferred && inferred.name && (inferred.confidence ?? 0) >= 0.3) {
+          logger.info('URL inference succeeded', {
+            sourceUrl,
+            name: inferred.name,
+            confidence: inferred.confidence,
+          });
+          // Merge inferred data with any partial scraped data we might have
+          extractedData = {
+            ...(extractedData || {}),
+            ...inferred,
+            // Preserve any image we did manage to scrape
+            image_url: extractedData?.image_url || inferred.image_url,
+            images: (extractedData?.images?.length ? extractedData.images : inferred.images) || [],
+          };
+          // One more OG image attempt as a last resort for visuals
+          if (!extractedData.image_url) {
+            const fallbackImg = await scraperService.fetchOGImage(sourceUrl).catch(() => null);
+            if (fallbackImg) {
+              extractedData.image_url = fallbackImg;
+              extractedData.images = [fallbackImg];
+            }
+          }
+          // Upload the final image to S3 now that we have one
+          if (extractedData.image_url) {
+            const s3Result = await uploadProductImages(
+              extractedData.image_url,
+              extractedData.images || []
+            ).catch(() => null);
+            if (s3Result) {
+              extractedData.image_url = s3Result.imageUrl || extractedData.image_url;
+              extractedData.images = s3Result.images.length > 0 ? s3Result.images : extractedData.images;
+            }
+          }
+        }
+      } catch (err) {
+        logger.warn('URL inference fallback failed', { sourceUrl, error: err.message });
+      }
+    }
+
     if (!extractedData || extractedData.confidence < 0.2) {
       const failMsg = sourceUrl
         ? 'We couldn\'t extract enough information from this link. Try sharing a screenshot of the page instead.'
