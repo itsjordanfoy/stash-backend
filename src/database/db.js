@@ -76,6 +76,19 @@ async function runMigrations() {
       ['products', 'imdb_score'],
       // VARCHAR(50) — app_version can be long (e.g. "2024.4.1 (build 12345)")
       ['products', 'app_version'],
+      // VARCHAR(20) — status enum includes 'awaiting_confirmation' which is 21 chars
+      ['import_queue', 'status'],
+      ['import_queue', 'source_type'],
+      // user_products status enums — widen proactively to survive future additions
+      ['user_products', 'source_type'],
+      ['user_products', 'listen_status'],
+      ['user_products', 'watch_status'],
+      ['user_products', 'read_status'],
+      ['user_products', 'game_status'],
+      ['user_products', 'size_preference'],
+      // Notifications type and subscription status — same safety play
+      ['notifications', 'type'],
+      ['users', 'subscription_status'],
     ];
     for (const [table, col] of toWiden) {
       await widenToText(client, table, col);

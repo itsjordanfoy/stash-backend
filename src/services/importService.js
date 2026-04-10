@@ -884,8 +884,57 @@ async function confirmImport(importId, userId, confirmedData) {
   return productId;
 }
 
+// Normalise whatever item_type the AI returns into our DB's allowed enum.
+// AI sometimes returns values like "film", "blog", "recipe", "website" that
+// aren't in our CHECK constraint — map them to the closest valid type rather
+// than bouncing the whole insert.
+const VALID_ITEM_TYPES = new Set([
+  'product', 'place', 'entertainment', 'event', 'general',
+  'course', 'podcast', 'youtube_video', 'video_game', 'wine', 'article', 'app',
+]);
+const ITEM_TYPE_ALIASES = {
+  // Movies/TV
+  film: 'entertainment', movie: 'entertainment', show: 'entertainment',
+  tv: 'entertainment', tv_show: 'entertainment', series: 'entertainment',
+  documentary: 'entertainment', anime: 'entertainment',
+  // Music (we store as general with genre=music or article if it's a review)
+  music: 'general', song: 'general', album: 'general', track: 'general',
+  // Video
+  video: 'youtube_video', vlog: 'youtube_video',
+  // Games
+  game: 'video_game', games: 'video_game', boardgame: 'video_game',
+  // Articles / blogs / news
+  blog: 'article', post: 'article', news: 'article',
+  story: 'article', essay: 'article', review: 'article',
+  // Recipes live in general with ingredients set
+  recipe: 'general',
+  // Apps
+  application: 'app', software: 'app', ios_app: 'app', android_app: 'app',
+  // Places
+  restaurant: 'place', hotel: 'place', bar: 'place', cafe: 'place',
+  shop: 'place', store: 'place', museum: 'place',
+  // Generic fallbacks
+  website: 'general', page: 'general', content: 'general', other: 'general',
+  unknown: 'general',
+};
+function normalizeItemType(raw) {
+  if (!raw) return 'general';
+  const t = String(raw).toLowerCase().trim().replace(/[\s-]+/g, '_');
+  if (VALID_ITEM_TYPES.has(t)) return t;
+  if (ITEM_TYPE_ALIASES[t]) return ITEM_TYPE_ALIASES[t];
+  // Strip plural, try again
+  const singular = t.replace(/s$/, '');
+  if (VALID_ITEM_TYPES.has(singular)) return singular;
+  if (ITEM_TYPE_ALIASES[singular]) return ITEM_TYPE_ALIASES[singular];
+  logger.warn('Unknown item_type from AI — defaulting to general', { raw });
+  return 'general';
+}
+
 async function createProduct(data, sourceUrl, sourceType) {
   return await transaction(async client => {
+    // Normalise item_type BEFORE we try to insert so we never fail the CHECK constraint
+    data.item_type = normalizeItemType(data.item_type);
+
     const productImages = JSON.stringify(
       Array.isArray(data.images) && data.images.length > 0
         ? data.images
