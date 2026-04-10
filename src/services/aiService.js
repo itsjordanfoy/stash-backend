@@ -679,6 +679,10 @@ async function findRetailersForProduct(product) {
 
   const isElectronics = /electron|tech|laptop|phone|tablet|headphone|earphone|audio|speaker|tv |camera|projector|fridge|freezer|appliance|monitor|console|gaming/.test(catAndName);
   const isFashion = /fashion|cloth|apparel|shoe|sneaker|tshirt|t-shirt|dress|jacket|shirt|hoodie|trouser|pants|polo|tee\b/.test(catAndName);
+  const isBook = /book|novel|fiction|non-fiction|biography|memoir|history|paperback|hardcover|isbn/.test(catAndName)
+    || (product.brand || '').toLowerCase().includes('penguin')
+    || (product.brand || '').toLowerCase().includes('harper')
+    || (product.brand || '').toLowerCase().includes('random house');
 
   // Retailer definitions: search URL + how to extract first product link from the results page
   const candidates = [];
@@ -698,6 +702,46 @@ async function findRetailersForProduct(product) {
       return found;
     },
   });
+
+  // Waterstones — UK's largest book chain
+  if (isBook) {
+    candidates.push({
+      name: 'Waterstones',
+      searchUrl: `https://www.waterstones.com/books/search/term/${encodeURIComponent(searchQuery)}`,
+      extract($) {
+        let found = null;
+        $('a[href]').each((_, el) => {
+          if (found) return;
+          let href = $(el).attr('href') || '';
+          if (!href.startsWith('http')) href = 'https://www.waterstones.com' + href;
+          // Waterstones product URLs end with the ISBN: /book/title/author/9780241723531
+          if (/waterstones\.com\/book\/[^?#]+\/\d{10,13}$/.test(href.split('?')[0])) {
+            found = href.split('?')[0];
+          }
+        });
+        return found;
+      },
+    });
+
+    // Blackwell's — second-biggest UK academic & general bookseller
+    candidates.push({
+      name: "Blackwell's",
+      searchUrl: `https://blackwells.co.uk/bookshop/search?keyword=${encodeURIComponent(searchQuery)}`,
+      extract($) {
+        let found = null;
+        $('a[href]').each((_, el) => {
+          if (found) return;
+          let href = $(el).attr('href') || '';
+          if (!href.startsWith('http')) href = 'https://blackwells.co.uk' + href;
+          // Blackwell's product URLs end with ISBN-13: /bookshop/product/Title-by-Author/9781408739419
+          if (/blackwells\.co\.uk\/bookshop\/product\/[^?#]+\/\d{13}/.test(href.split('?')[0])) {
+            found = href.split('?')[0];
+          }
+        });
+        return found;
+      },
+    });
+  }
 
   if (isElectronics || isFashion) {
     candidates.push({
@@ -768,9 +812,55 @@ async function findRetailersForProduct(product) {
     })
   );
 
-  return results
+  const hardcodedResults = results
     .filter(r => r.status === 'fulfilled' && r.value)
     .map(r => r.value);
+
+  // ── AI-driven long tail of retailer suggestions ──────────────────────────
+  // The hardcoded list above is fast & deterministic but only covers 4–6
+  // retailers. Ask Claude to suggest 6–8 MORE category-appropriate retailers
+  // based on its world knowledge so the "Where to buy" section becomes a real
+  // shopping aid. Claude returns search-page URLs (not invented product URLs)
+  // so the user always lands on real, current results.
+  let aiSuggestions = [];
+  try {
+    const aiMessage = await withRetry(() => client.messages.create({
+      model: MODEL,
+      max_tokens: 1024,
+      system: `You are a UK shopping concierge. For any product, you know the most likely UK retailers that sell it. You output JSON with retailer names and SEARCH URLs (not invented product URLs). The user clicks through to a real, live search results page on each retailer.`,
+      messages: [{
+        role: 'user',
+        content: `Product:
+- Name: ${product.name}
+- Brand: ${product.brand || '(unknown)'}
+- Category: ${product.category || '(unknown)'}
+
+List 6–8 UK retailers most likely to sell this exact product. For each, provide a SEARCH URL — the real, working search URL for that retailer with the product name URL-encoded as the query parameter. Cover a mix of: large generalists (Amazon, John Lewis, Argos), category specialists (Foyles for books, Currys for electronics, Lakeland for kitchen, etc.), supermarkets if relevant (Tesco, Sainsbury's), and quality specialists where applicable (Selfridges, Liberty, Harrods).
+
+DO NOT invent product page URLs. Only return search URLs you are 100% confident about (e.g. https://www.foyles.co.uk/all?term=nazi+mind, https://www.waterstones.com/books/search/term/nazi+mind).
+
+Return ONLY a JSON array, no markdown:
+[
+  {"retailer_name": "Foyles", "url": "https://..."},
+  {"retailer_name": "Waterstones", "url": "https://..."}
+]`,
+      }],
+    }));
+    const text = aiMessage.content.find(b => b.type === 'text')?.text || '[]';
+    const parsed = parseJSON(text);
+    if (Array.isArray(parsed)) {
+      aiSuggestions = parsed
+        .filter(s => s && typeof s.url === 'string' && typeof s.retailer_name === 'string')
+        .filter(s => /^https?:\/\//.test(s.url))
+        // De-duplicate against the hardcoded results — match by retailer name (case-insensitive)
+        .filter(s => !hardcodedResults.some(h => h.retailer_name.toLowerCase() === s.retailer_name.toLowerCase()));
+      logger.info('AI retailer suggestions', { count: aiSuggestions.length, names: aiSuggestions.map(s => s.retailer_name) });
+    }
+  } catch (err) {
+    logger.warn('AI retailer suggestion failed', { error: err.message });
+  }
+
+  return [...hardcodedResults, ...aiSuggestions];
 }
 
 /**

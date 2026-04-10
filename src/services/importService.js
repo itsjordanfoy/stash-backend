@@ -1210,26 +1210,57 @@ async function discoverRetailersInBackground(productId, productData) {
   };
 
   const suggestions = await findRetailersForProduct(product);
-  if (!Array.isArray(suggestions) || suggestions.length === 0) return;
+  if (!Array.isArray(suggestions) || suggestions.length === 0) {
+    logger.info('Background retailer discovery — no candidates found', { productId });
+    return;
+  }
 
   logger.info('Background retailer discovery starting', {
     productId,
     name: product.name,
     candidates: suggestions.length,
+    retailers: suggestions.map(s => s.retailer_name),
   });
 
   let added = 0;
+  let priceFound = 0;
+  let titleMismatch = 0;
+  let scrapeFailed = 0;
+
   await Promise.allSettled(
     suggestions.map(async suggestion => {
       if (!suggestion.url || !suggestion.retailer_name) return;
       try {
-        const priceData = await scrapeRetailerPrice(suggestion.url);
-        if (!priceData?.price) return;
+        const priceData = await scrapeRetailerPrice(suggestion.url).catch(err => {
+          logger.warn('Retailer price scrape threw', {
+            retailer: suggestion.retailer_name,
+            url: suggestion.url,
+            error: err.message,
+          });
+          return null;
+        });
 
-        // Reject if the page is for a different product (e.g. search returned
-        // a similar but wrong item)
-        if (!isSameProduct(product.name, product.brand, priceData.pageTitle)) {
-          logger.debug('Retailer search result rejected — different product', {
+        // CASE A: full success — got price + matching title → store with price
+        if (priceData?.price && isSameProduct(product.name, product.brand, priceData.pageTitle)) {
+          await query(
+            `INSERT INTO product_retailers (product_id, retailer_name, product_url, current_price, currency, in_stock)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (product_id, product_url) DO UPDATE
+               SET current_price = EXCLUDED.current_price,
+                   in_stock = EXCLUDED.in_stock,
+                   last_checked = NOW()`,
+            [productId, suggestion.retailer_name, suggestion.url, priceData.price, priceData.currency || 'GBP', priceData.in_stock ?? true]
+          );
+          added++;
+          priceFound++;
+          return;
+        }
+
+        // CASE B: title clearly mismatched even though we got a price — reject
+        if (priceData?.price && priceData.pageTitle &&
+            !isSameProduct(product.name, product.brand, priceData.pageTitle)) {
+          titleMismatch++;
+          logger.info('Retailer rejected — title mismatch', {
             product: product.name,
             retailer: suggestion.retailer_name,
             pageTitle: priceData.pageTitle,
@@ -1237,23 +1268,38 @@ async function discoverRetailersInBackground(productId, productData) {
           return;
         }
 
+        // CASE C: scraper failed entirely (bot block, JS-rendered, timeout) —
+        // store the URL anyway with no price. The user clicks through to view
+        // the product page; the nightly price tracking job will retry the scrape.
+        // Without this fallback, bot-blocked retailers (Amazon, IKEA…) never
+        // surface as "Where to buy" entries even though the URL is correct.
+        scrapeFailed++;
         await query(
           `INSERT INTO product_retailers (product_id, retailer_name, product_url, current_price, currency, in_stock)
-           VALUES ($1, $2, $3, $4, $5, $6)
-           ON CONFLICT (product_id, product_url) DO UPDATE
-             SET current_price = EXCLUDED.current_price,
-                 in_stock = EXCLUDED.in_stock,
-                 last_checked = NOW()`,
-          [productId, suggestion.retailer_name, suggestion.url, priceData.price, priceData.currency || 'GBP', priceData.in_stock ?? true]
+           VALUES ($1, $2, $3, NULL, 'GBP', TRUE)
+           ON CONFLICT (product_id, product_url) DO NOTHING`,
+          [productId, suggestion.retailer_name, suggestion.url]
         );
         added++;
-      } catch { /* swallow per-suggestion errors */ }
+        logger.info('Retailer added without price (scrape failed)', {
+          retailer: suggestion.retailer_name,
+          url: suggestion.url,
+        });
+      } catch (err) {
+        logger.warn('Retailer discovery iteration failed', {
+          retailer: suggestion.retailer_name,
+          error: err.message,
+        });
+      }
     })
   );
 
   logger.info('Background retailer discovery complete', {
     productId,
     added,
+    priceFound,
+    titleMismatch,
+    scrapeFailed,
   });
 }
 
