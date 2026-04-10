@@ -326,7 +326,7 @@ function classifyUrlCategory(url) {
  * Main import orchestrator. Creates an import_queue entry and begins processing.
  * Returns { importId, status, product?, suggestions? }
  */
-async function startImport({ userId, sourceType, sourceUrl, screenshotKey, rawText }) {
+async function startImport({ userId, sourceType, sourceUrl, screenshotKey, rawText, screenshotMime }) {
   // Create queue entry
   const queueResult = await query(
     `INSERT INTO import_queue (user_id, source_type, source_url, screenshot_key, raw_text, status)
@@ -337,7 +337,7 @@ async function startImport({ userId, sourceType, sourceUrl, screenshotKey, rawTe
   const importId = queueResult.rows[0].id;
 
   // Process async — don't await
-  processImport(importId, { userId, sourceType, sourceUrl, screenshotKey, rawText }).catch(err => {
+  processImport(importId, { userId, sourceType, sourceUrl, screenshotKey, rawText, screenshotMime }).catch(err => {
     logger.error('Import processing failed', { importId, error: err.message });
     markFailed(importId, err.message).catch(() => {});
   });
@@ -345,13 +345,14 @@ async function startImport({ userId, sourceType, sourceUrl, screenshotKey, rawTe
   return { importId, status: 'processing' };
 }
 
-async function processImport(importId, { userId, sourceType, sourceUrl, screenshotKey, rawText }) {
+async function processImport(importId, { userId, sourceType, sourceUrl, screenshotKey, rawText, screenshotMime }) {
   try {
     let extractedData = null;
 
     if (sourceType === 'screenshot' && rawText) {
-      // rawText contains base64 image data
-      extractedData = await aiService.analyzeScreenshot(rawText);
+      // rawText contains base64 image data; mime defaults to image/jpeg
+      // because the upload route preprocesses everything to JPEG via sharp
+      extractedData = await aiService.analyzeScreenshot(rawText, screenshotMime || 'image/jpeg');
       // Use the uploaded screenshot itself as the product image if AI didn't find one
       if (!extractedData.image_url && screenshotKey) {
         extractedData.image_url = await getPresignedUrl(screenshotKey, 604800).catch(() => null);

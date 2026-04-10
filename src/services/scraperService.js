@@ -666,9 +666,21 @@ async function captureScreenshot(url) {
       return null;
     }
 
-    const base64 = Buffer.from(r.data).toString('base64');
-    logger.info('Screenshot captured', { url, bytes: r.data.length });
-    return { base64, mimeType: 'image/png' };
+    // Same preprocessing as the user-upload screenshot route — resize + JPEG
+    // so we never trip the Anthropic Vision 5 MB limit on full-page captures.
+    const sharp = require('sharp');
+    const processedBuffer = await sharp(Buffer.from(r.data))
+      .resize({ width: 2000, height: 2000, fit: 'inside', withoutEnlargement: true })
+      .jpeg({ quality: 85, mozjpeg: true })
+      .toBuffer();
+
+    const base64 = processedBuffer.toString('base64');
+    logger.info('Screenshot captured', {
+      url,
+      origBytes: r.data.length,
+      processedBytes: processedBuffer.length,
+    });
+    return { base64, mimeType: 'image/jpeg' };
   } catch (err) {
     logger.warn('Screenshot capture failed', { url, error: err.message });
     return null;

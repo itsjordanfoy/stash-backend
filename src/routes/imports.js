@@ -50,8 +50,35 @@ router.post('/screenshot', authenticate, loadUserData, upload.single('screenshot
   if (!req.file) return res.status(400).json({ error: 'Screenshot file required' });
 
   try {
-    // Upload to S3 — optional. If AWS credentials are not configured the import
-    // still works; the AI vision analysis runs from the in-memory base64 buffer.
+    // ── Preprocess for the Anthropic Vision API ────────────────────────────
+    // The API rejects images larger than 5 MB (after base64) and rejects
+    // mismatched mime types. We use sharp to:
+    //   1. Auto-rotate based on EXIF orientation
+    //   2. Resize so the longest edge ≤ 2000 px (vision quality is unaffected)
+    //   3. Re-encode as JPEG quality 85 (small, vision-safe, single mime type)
+    // This single conversion solves both the size limit AND the
+    // png-vs-jpeg mime mismatch in one pass.
+    const sharp = require('sharp');
+    let processedBuffer;
+    try {
+      processedBuffer = await sharp(req.file.buffer)
+        .rotate()                                  // honour EXIF orientation
+        .resize({
+          width: 2000,
+          height: 2000,
+          fit: 'inside',
+          withoutEnlargement: true,
+        })
+        .jpeg({ quality: 85, mozjpeg: true })
+        .toBuffer();
+    } catch (err) {
+      logger.warn('sharp preprocessing failed — falling back to raw buffer', {
+        error: err.message,
+      });
+      processedBuffer = req.file.buffer;
+    }
+
+    // Upload the ORIGINAL to S3 for the user's records (full quality preserved)
     let screenshotKey = null;
     try {
       screenshotKey = await uploadScreenshot(req.file.buffer, req.file.mimetype);
@@ -59,14 +86,15 @@ router.post('/screenshot', authenticate, loadUserData, upload.single('screenshot
       logger.warn('S3 upload skipped — screenshot will not be persisted', { error: s3Err.message });
     }
 
-    // Convert to base64 for AI analysis
-    const base64Image = req.file.buffer.toString('base64');
+    // Convert the PROCESSED buffer to base64 for AI vision (always JPEG now)
+    const base64Image = processedBuffer.toString('base64');
 
     const result = await startImport({
       userId: req.user.id,
       sourceType: 'screenshot',
       screenshotKey, // may be null — importService handles this gracefully
-      rawText: base64Image, // passed to AI vision
+      rawText: base64Image, // base64 of the processed JPEG
+      screenshotMime: 'image/jpeg', // matches the processed buffer
     });
 
     res.status(202).json(result);
