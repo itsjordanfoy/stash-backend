@@ -601,13 +601,32 @@ async function processImport(importId, { userId, sourceType, sourceUrl, screensh
         reviews: mergedReviews.length > 0 ? mergedReviews : null,
       };
 
-      // Ensure all image URLs are absolute, HTTPS, and clean
+      // Ensure all image URLs are absolute, HTTPS, and clean.
+      // Also rejects malformed URLs like
+      //   https://www.dyson.co.uk/vacuum-cleaners/cordless/v8/1024&wid=224
+      // where an unreplaced template placeholder got concatenated into the path.
+      // A valid image URL must (a) parse as a URL, (b) have a recognisable image
+      // extension OR a well-known image CDN pattern, and (c) not contain stray
+      // & characters outside of a proper query string.
       const normalizeImageUrl = (img) => {
         if (!img) return null;
         try {
           let abs = img.startsWith('http') ? img : new URL(img, sourceUrl).href;
           abs = abs.replace(/\{width\}/g, '800').replace(/\{height\}/g, '800');
           abs = abs.replace(/^http:\/\//i, 'https://');
+
+          // Reject if the URL has an unquoted & in the path (template placeholder leak)
+          const u = new URL(abs);
+          if (u.pathname.includes('&')) return null;
+
+          // Must look like an image: either a real image extension in the path,
+          // a known image-CDN path marker, or an image-friendly query param.
+          const path = u.pathname.toLowerCase();
+          const hasImageExtension = /\.(jpe?g|png|webp|gif|avif|svg|bmp)(?:$|\?)/.test(path);
+          const hasImageCdnMarker = /\/(images|image|img|media|photos|photo|assets|cdn|static)\//i.test(path);
+          const hasImageQuery = /format=(png|jpe?g|webp|gif)|fmt=(png|jpe?g|webp|gif)|wid=\d/i.test(u.search);
+          if (!hasImageExtension && !hasImageCdnMarker && !hasImageQuery) return null;
+
           return abs;
         } catch { return null; }
       };
@@ -1380,6 +1399,45 @@ async function discoverRetailersInBackground(productId, productData) {
     titleMismatch,
     scrapeFailed,
   });
+
+  // ── Outlier price sanity check ─────────────────────────────────────────
+  // When the original page is a cluttered commerce site (Dyson.co.uk, etc.)
+  // the AI sometimes grabs a "£7/month" financing chip or a filter accessory
+  // price instead of the product price. We detect this by comparing all
+  // prices we found; if the lowest-priced retailer is wildly different from
+  // the median, it's almost certainly an extraction error → null it out.
+  try {
+    const { rows: priced } = await query(
+      `SELECT id, retailer_name, current_price FROM product_retailers
+       WHERE product_id = $1 AND current_price IS NOT NULL
+       ORDER BY current_price ASC`,
+      [productId]
+    );
+    if (priced.length >= 2) {
+      const prices = priced.map(r => parseFloat(r.current_price)).sort((a, b) => a - b);
+      const median = prices[Math.floor(prices.length / 2)];
+      // A retailer price counts as an outlier if it's less than 25% of the
+      // median. That safely keeps legitimate sale prices (typically 50%+ off)
+      // while catching Dyson's "£7/month from Klarna" style extraction errors.
+      const outlierThreshold = median * 0.25;
+      const outliers = priced.filter(r => parseFloat(r.current_price) < outlierThreshold);
+      if (outliers.length > 0) {
+        logger.warn('Price outliers detected — nullifying', {
+          productId,
+          median,
+          outliers: outliers.map(o => ({ retailer: o.retailer_name, price: o.current_price })),
+        });
+        for (const o of outliers) {
+          await query(
+            `UPDATE product_retailers SET current_price = NULL WHERE id = $1`,
+            [o.id]
+          );
+        }
+      }
+    }
+  } catch (err) {
+    logger.warn('Outlier price check failed', { productId, error: err.message });
+  }
 }
 
 async function findExistingProduct(data) {
