@@ -127,13 +127,18 @@ function parseProductPage(html, url) {
   if (!html) return null;
   const $ = cheerio.load(html);
 
-  // 1. Try JSON-LD structured data
+  // 1. Try JSON-LD structured data — this is explicit product data, so
+  //    consumers can trust its name/description/price fully.
   const jsonLdProduct = extractJsonLd($);
-  if (jsonLdProduct) return jsonLdProduct;
+  if (jsonLdProduct) return { ...jsonLdProduct, _source: 'jsonld' };
 
-  // 2. Heuristic extraction
+  // 2. Heuristic extraction — the name/description here come from <title>,
+  //    <h1>, and <meta name="description"> which are fine for product pages
+  //    but noisy for homepages and non-product pages. Marked as 'heuristic'
+  //    so callers know to treat these fields as low-trust fallbacks.
   const imgs = extractImages($, url);
   return {
+    _source: 'heuristic',
     name: extractTitle($),
     price: extractPrice($),
     currency: extractCurrency($, html),

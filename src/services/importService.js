@@ -560,27 +560,53 @@ async function processImport(importId, { userId, sourceType, sourceUrl, screensh
       // it comes straight from the store's CMS.
       const shopifyData = await scraperService.fetchShopifyProduct(sourceUrl).catch(() => null);
 
-      // Merge in priority order: Shopify JSON > JSON-LD (in htmlData) > OG > HTML heuristics
-      // Each later fallback only fills gaps left by the higher-priority source.
+      // Distinguish STRUCTURED scraped data (trustworthy) from HEURISTIC
+      // scraped data (noisy on non-product pages).
+      //   Shopify JSON, JSON-LD → structured; name/description trustworthy
+      //   heuristic extractTitle/description → low-trust, let AI override
+      const isStructuredHtml = htmlData?._source === 'jsonld';
+      const structuredData = [shopifyData, isStructuredHtml ? htmlData : null].filter(Boolean);
+      const heuristicData = !isStructuredHtml ? htmlData : null;
+
+      // Build rawPageData in priority order:
+      //   1. Shopify JSON & JSON-LD Product — trusted for name/description/brand/price
+      //   2. OG tags — trusted for image, reasonable for title and description
+      //   3. Heuristic HTML — LOW trust for name/description, OK for images
       const rawPageData = {};
-      const fields = ['name', 'brand', 'description', 'price', 'currency', 'image_url', 'images', 'retailer_name'];
-      const sources = [shopifyData, htmlData, ogData].filter(Boolean);
-      for (const field of fields) {
-        for (const source of sources) {
+      const trustedFields = ['name', 'brand', 'description', 'price', 'currency', 'image_url', 'images', 'retailer_name'];
+      for (const field of trustedFields) {
+        for (const source of structuredData) {
           const v = source[field];
           if (v != null && v !== '' && !(Array.isArray(v) && v.length === 0)) {
             if (rawPageData[field] == null) rawPageData[field] = v;
           }
         }
       }
-      // OG-specific mapping: its "title" and "site_name" fields map to name/retailer_name
+      // OG tags fill remaining gaps (well-curated per-page metadata)
       if (!rawPageData.name && ogData?.title) rawPageData.name = ogData.title;
       if (!rawPageData.image_url && ogData?.image) rawPageData.image_url = ogData.image;
       if (!rawPageData.description && ogData?.description) rawPageData.description = ogData.description;
       if (!rawPageData.retailer_name && ogData?.site_name) rawPageData.retailer_name = ogData.site_name;
       if (!rawPageData.price && ogData?.price) rawPageData.price = ogData.price;
+      // Heuristic data fills IMAGE gaps only (title/description from
+      // heuristics are too noisy on non-product pages to prefer over AI)
+      if (heuristicData) {
+        if (!rawPageData.image_url && heuristicData.image_url) rawPageData.image_url = heuristicData.image_url;
+        if (!rawPageData.images && Array.isArray(heuristicData.images) && heuristicData.images.length > 0) {
+          rawPageData.images = heuristicData.images;
+        }
+        // Heuristic price is usable if nothing else found one
+        if (rawPageData.price == null && heuristicData.price != null) {
+          rawPageData.price = heuristicData.price;
+          rawPageData.currency = heuristicData.currency || rawPageData.currency;
+        }
+      }
       // Preserve reviews from htmlData (JSON-LD parser embeds them)
       if (htmlData?.reviews) rawPageData.reviews = htmlData.reviews;
+      // Mark this data as structurally trusted so the downstream merge can
+      // decide whether to let scraped name/description win over AI.
+      rawPageData._trustedName = structuredData.some(s => s.name != null);
+      rawPageData._trustedDescription = structuredData.some(s => s.description != null);
 
       // Use AI to extract and enrich (with URL-based category hint if detectable)
       const urlCategory = classifyUrlCategory(sourceUrl);
@@ -608,15 +634,21 @@ async function processImport(importId, { userId, sourceType, sourceUrl, screensh
         return combined.slice(0, 5);
       })();
 
-      // Build the merged object by starting from the AI result (which provides
-      // enrichment fields), then selectively overriding the identifying fields
-      // with the scraped values when they exist.
+      // Build the merged object. Identifying fields (name, description) only
+      // prefer scraped data when it's from a STRUCTURED source (Shopify JSON
+      // or JSON-LD Product schema). For heuristic scrapes the AI's inference
+      // is usually better — it can rewrite noisy <title> tags like
+      // "Google Maps" or "dezeen-logo" into something sensible.
+      // Price, brand, and images are safer to prefer from scraped sources
+      // when available since those fields tend to be more literal.
       const scraped = rawPageData || {};
       extractedData = {
         ...extractedData,
-        // Identifying fields — scraped wins when non-empty
-        name: scraped.name || extractedData.name,
-        description: scraped.description || extractedData.description,
+        // Name and description: only let SCRAPED win when the source was
+        // structured (JSON-LD / Shopify). Otherwise keep the AI version.
+        name: scraped._trustedName && scraped.name ? scraped.name : extractedData.name,
+        description: scraped._trustedDescription && scraped.description ? scraped.description : (extractedData.description || scraped.description),
+        // Brand, price, image: always prefer scraped when non-empty
         brand: scraped.brand || extractedData.brand,
         price: (scraped.price != null && scraped.price > 0) ? scraped.price : extractedData.price,
         currency: scraped.currency || extractedData.currency,
@@ -633,6 +665,10 @@ async function processImport(importId, { userId, sourceType, sourceUrl, screensh
         ].filter(Boolean).slice(0, 8),
         reviews: mergedReviews.length > 0 ? mergedReviews : null,
       };
+      // Don't persist the internal trust flags
+      delete extractedData._trustedName;
+      delete extractedData._trustedDescription;
+      delete extractedData._source;
 
       // Ensure all image URLs are absolute, HTTPS, and clean.
       // Also rejects malformed URLs like
@@ -888,8 +924,12 @@ async function processImport(importId, { userId, sourceType, sourceUrl, screensh
     // Check for existing matching product
     const existingProduct = await findExistingProduct(extractedData);
 
-    if (existingProduct && extractedData.confidence >= CONFIDENCE_THRESHOLD) {
-      // High confidence + existing match → update images if we scraped better data, then complete
+    // Existing product match — ALWAYS use it regardless of confidence.
+    // The existing product is the canonical record; if our name fuzzy-matched
+    // it, the user definitely wants the same product. Previously we only
+    // took this path when confidence was ≥ 0.75, leaving mid-confidence
+    // imports (IKEA Kallax, IMDb titles, etc.) stuck in awaiting_confirmation.
+    if (existingProduct) {
       const freshImages = Array.isArray(extractedData.images) && extractedData.images.length > 0
         ? extractedData.images : [];
       const descriptionUpdate = extractedData.description && !existingProduct.description
@@ -929,16 +969,12 @@ async function processImport(importId, { userId, sourceType, sourceUrl, screensh
       return;
     }
 
-    // Low confidence → return suggestions for user confirmation
+    // Low confidence and no existing match → auto-accept the single suggestion.
+    // Better to save and let the user edit if wrong than to block them on a
+    // confirmation dialog for the one and only option we extracted.
     const suggestions = [extractedData];
-    if (existingProduct) {
-      suggestions.unshift({ ...existingProduct, confidence: 0.9 });
-    }
 
-    // If there's only ONE suggestion (no existing match), there's nothing for
-    // the user to choose between — auto-accept rather than blocking on a fake
-    // confirmation dialog. Better to save and let the user edit if it's wrong.
-    if (suggestions.length === 1 && !existingProduct) {
+    if (suggestions.length === 1) {
       logger.info('Single-suggestion auto-accept', { importId, name: extractedData.name });
       const productId = await createProduct(extractedData, sourceUrl, sourceType);
       aiService.generateSuggestedQuestions(extractedData).then(questions => {
