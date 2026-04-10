@@ -27,18 +27,70 @@ function isYouTubeUrl(url) {
   } catch { return false; }
 }
 
+function isApplePodcastUrl(url) {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return host.includes('podcasts.apple.com');
+  } catch { return false; }
+}
+
+function isSpotifyUrl(url) {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return host.includes('open.spotify.com');
+  } catch { return false; }
+}
+
 /**
  * Fetch YouTube metadata via the free oEmbed API (no API key needed).
  * Returns { title, author_name, thumbnail_url, provider_name } or null.
  */
 async function fetchYouTubeOembed(videoUrl) {
   try {
-    const endpoint = `https://www.youtube.com/oembed?url=${encodeURIComponent(videoUrl)}&format=json`;
     const axios = require('axios');
+    const endpoint = `https://www.youtube.com/oembed?url=${encodeURIComponent(videoUrl)}&format=json`;
     const res = await axios.get(endpoint, { timeout: 8000 });
     return res.data || null;
   } catch (err) {
     logger.warn('YouTube oEmbed failed', { url: videoUrl, error: err.message });
+    return null;
+  }
+}
+
+/**
+ * Fetch Apple Podcast metadata via the iTunes Lookup API (no key needed).
+ * Extracts the numeric podcast ID from the URL path.
+ */
+async function fetchApplePodcastData(podcastUrl) {
+  try {
+    const axios = require('axios');
+    const idMatch = podcastUrl.match(/\/id(\d+)/);
+    if (!idMatch) return null;
+    const id = idMatch[1];
+    const res = await axios.get(
+      `https://itunes.apple.com/lookup?id=${id}&entity=podcast&limit=1`,
+      { timeout: 8000 }
+    );
+    const results = res.data?.results;
+    return results && results.length > 0 ? results[0] : null;
+  } catch (err) {
+    logger.warn('iTunes lookup failed', { url: podcastUrl, error: err.message });
+    return null;
+  }
+}
+
+/**
+ * Fetch Spotify metadata via their oEmbed API (no key needed).
+ * Works for tracks, albums, playlists. Returns null for shows (they return 500).
+ */
+async function fetchSpotifyOembed(spotifyUrl) {
+  try {
+    const axios = require('axios');
+    const endpoint = `https://open.spotify.com/oembed?url=${encodeURIComponent(spotifyUrl)}`;
+    const res = await axios.get(endpoint, { timeout: 8000 });
+    return res.data || null;
+  } catch (err) {
+    logger.warn('Spotify oEmbed failed', { url: spotifyUrl, error: err.message });
     return null;
   }
 }
@@ -273,6 +325,81 @@ async function processImport(importId, { userId, sourceType, sourceUrl, screensh
       } else {
         // OG failed — use URL structure to build a minimal but valid item
         extractedData = buildSocialFallback(sourceUrl);
+      }
+    } else if (isApplePodcastUrl(sourceUrl)) {
+      // podcasts.apple.com blocks scraping — use iTunes Lookup API
+      const podcastData = await fetchApplePodcastData(sourceUrl);
+      if (podcastData) {
+        const ogData = {
+          title: podcastData.collectionName || podcastData.trackName,
+          description: podcastData.description || null,
+          image: podcastData.artworkUrl600 || podcastData.artworkUrl100 || null,
+          site_name: 'Apple Podcasts',
+        };
+        const aiResult = await aiService.extractProductFromUrl(sourceUrl, null, ogData, 'Podcast').catch(() => null);
+        if (aiResult && aiResult.confidence >= 0.4) {
+          extractedData = aiResult;
+        } else {
+          extractedData = {
+            name: ogData.title || 'Podcast',
+            item_type: 'podcast',
+            description: `${podcastData.primaryGenreName || 'Podcast'} by ${podcastData.artistName || ''}`.trim(),
+            category: 'Podcasts',
+            image_url: ogData.image,
+            artist_or_director: podcastData.artistName || null,
+            episode_count: podcastData.trackCount || null,
+            podcast_network: podcastData.artistName || null,
+            cta_label: 'Listen on Apple Podcasts',
+            cta_url: sourceUrl,
+            confidence: 0.9,
+          };
+        }
+        if (!extractedData.image_url && ogData.image) extractedData.image_url = ogData.image;
+        extractedData.confidence = Math.max(extractedData.confidence || 0, 0.85);
+      } else {
+        throw new Error('Could not load this podcast. It may be unavailable in this region.');
+      }
+    } else if (isSpotifyUrl(sourceUrl)) {
+      // Spotify blocks server-side scraping. oEmbed works for tracks/albums/playlists.
+      const oembed = await fetchSpotifyOembed(sourceUrl);
+      if (oembed?.title) {
+        const { pathname } = new URL(sourceUrl);
+        const isShow = pathname.includes('/show') || pathname.includes('/episode');
+        const ogData = {
+          title: oembed.title,
+          description: null,
+          image: oembed.thumbnail_url || null,
+          site_name: 'Spotify',
+        };
+        const urlCategory = isShow ? 'Podcast' : null;
+        const aiResult = await aiService.extractProductFromUrl(sourceUrl, null, ogData, urlCategory).catch(() => null);
+        extractedData = (aiResult && aiResult.confidence >= 0.4) ? aiResult : {
+          name: oembed.title,
+          item_type: isShow ? 'podcast' : 'entertainment',
+          category: isShow ? 'Podcasts' : 'Music',
+          image_url: oembed.thumbnail_url || null,
+          cta_label: 'Listen on Spotify',
+          cta_url: sourceUrl,
+          confidence: 0.85,
+        };
+        if (!extractedData.image_url && oembed.thumbnail_url) extractedData.image_url = oembed.thumbnail_url;
+        extractedData.confidence = Math.max(extractedData.confidence || 0, 0.85);
+      } else {
+        // oEmbed failed (likely a show) — fall back to OG
+        const ogData = await scraperService.extractOpenGraph(sourceUrl, null).catch(() => null);
+        if (ogData?.title) {
+          extractedData = {
+            name: ogData.title,
+            item_type: 'podcast',
+            category: 'Podcasts',
+            image_url: ogData.image || null,
+            cta_label: 'Listen on Spotify',
+            cta_url: sourceUrl,
+            confidence: 0.8,
+          };
+        } else {
+          throw new Error('Could not load this Spotify content. It may be unavailable.');
+        }
       }
     } else if (isYouTubeUrl(sourceUrl)) {
       // YouTube blocks server-side scraping — use the free oEmbed API instead.
