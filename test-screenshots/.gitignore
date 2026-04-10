@@ -1,0 +1,4 @@
+# Ignore all test screenshots — they may contain personal/private content
+*
+!.gitignore
+!README.md

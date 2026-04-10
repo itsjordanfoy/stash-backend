@@ -74,6 +74,7 @@ const SECTION_SEVERITY = {
   'Notifications':           'minor',
   'Subscriptions':           'minor',
   'Social URL handling':     'minor',
+  'URL stress — real-world URLs': 'degraded',
   'Cleanup':                 'minor',
 };
 
@@ -284,10 +285,10 @@ async function main() {
     status === 401 ? pass('No auth token → 401') : fail('No auth token rejection', `got ${status}`);
   } catch (e) { fail('No auth token rejection', e.message); }
 
-  // GET /api/users/me
+  // GET /api/users/me (backend lowercases emails, compare accordingly)
   try {
     const { data, ok } = await req('GET', '/api/users/me', { token: userA.token });
-    ok && data.email === userA.email
+    ok && data.email?.toLowerCase() === userA.email.toLowerCase()
       ? pass('GET /api/users/me')
       : fail('GET /api/users/me', JSON.stringify(data).slice(0, 120));
   } catch (e) { fail('GET /api/users/me', e.message); }
@@ -482,18 +483,20 @@ async function main() {
           fail('Deep: product.name missing or empty');
         }
 
-        // Retailers array shape
+        // Retailers array shape. The API returns `current_price` and
+        // `product_url` (not `price` / `url`).
         if (Array.isArray(data.retailers) && data.retailers.length >= 1) {
           pass(`Deep: product.retailers present (${data.retailers.length})`);
 
           const r0 = data.retailers[0];
 
-          // Price > 0
-          const price = typeof r0.price === 'string' ? parseFloat(r0.price) : r0.price;
+          // Price > 0 — current_price can come back as a string or float
+          const rawPrice = r0.current_price ?? r0.price;
+          const price = typeof rawPrice === 'string' ? parseFloat(rawPrice) : rawPrice;
           if (typeof price === 'number' && Number.isFinite(price) && price > 0) {
-            pass(`Deep: retailer price > 0 (${price})`);
+            pass(`Deep: retailer current_price > 0 (${price})`);
           } else {
-            fail('Deep: retailer price invalid or ≤ 0', `price=${r0.price}`);
+            fail('Deep: retailer current_price invalid or ≤ 0', `current_price=${rawPrice}`);
           }
 
           // Currency ISO code
@@ -504,29 +507,38 @@ async function main() {
           }
 
           // Retailer URL contains BASE_URL host (same origin as fixture)
-          if (typeof r0.url === 'string' && r0.url.length > 0) {
+          const rUrl = r0.product_url ?? r0.url;
+          if (typeof rUrl === 'string' && rUrl.length > 0) {
             try {
-              const retailerHost = new URL(r0.url).host;
+              const retailerHost = new URL(rUrl).host;
               const baseHost = new URL(BASE_URL).host;
-              if (retailerHost === baseHost || r0.url.includes(baseHost)) {
-                pass(`Deep: retailer URL on fixture host (${retailerHost})`);
+              if (retailerHost === baseHost || rUrl.includes(baseHost)) {
+                pass(`Deep: retailer product_url on fixture host (${retailerHost})`);
               } else {
-                fail('Deep: retailer URL host mismatch', `${retailerHost} vs ${baseHost}`);
+                fail('Deep: retailer product_url host mismatch', `${retailerHost} vs ${baseHost}`);
               }
             } catch {
-              fail('Deep: retailer URL not parseable', r0.url);
+              fail('Deep: retailer product_url not parseable', rUrl);
             }
           } else {
-            fail('Deep: retailer URL missing');
+            fail('Deep: retailer product_url missing');
           }
         } else {
           fail('Deep: product.retailers missing or empty');
         }
 
-        // Image URL liveness (optional — null is acceptable)
+        // Image URL liveness (optional — null is acceptable).
+        // Workaround: the scraper occasionally stores https://localhost... for
+        // fixture images resolved from relative paths. localhost has no HTTPS
+        // listener, so we downgrade to http for the HEAD check. This is a
+        // fixture-specific adjustment; real URLs are fetched as-is.
         if (data.image_url) {
+          let probeUrl = data.image_url;
+          if (probeUrl.startsWith('https://localhost')) {
+            probeUrl = probeUrl.replace('https://localhost', 'http://localhost');
+          }
           try {
-            const headRes = await fetch(data.image_url, { method: 'HEAD' });
+            const headRes = await fetch(probeUrl, { method: 'HEAD' });
             const ct = headRes.headers.get('content-type') ?? '';
             if (headRes.status === 200 && ct.startsWith('image/')) {
               pass(`Deep: image_url HEAD 200 (${ct.split(';')[0]})`);
@@ -534,7 +546,7 @@ async function main() {
               fail('Deep: image_url HEAD failed', `status=${headRes.status}, ct=${ct}`);
             }
           } catch (e) {
-            fail('Deep: image_url fetch error', e.message);
+            fail('Deep: image_url fetch error', `${e.message} (url=${probeUrl})`);
           }
         } else {
           emit(`    ${c.dim}(image_url is null — skipping HEAD check)${c.reset}`);
@@ -651,7 +663,11 @@ async function main() {
               }
               try {
                 const obj = JSON.parse(payload);
-                if (typeof obj.content === 'string') contentAccumulated += obj.content;
+                // The aiService emits { token: "..." } per chunk (see
+                // services/aiService.js:764). Fall back to other common
+                // field names for resilience if the format changes.
+                if (typeof obj.token === 'string') contentAccumulated += obj.token;
+                else if (typeof obj.content === 'string') contentAccumulated += obj.content;
                 else if (typeof obj.delta === 'string') contentAccumulated += obj.delta;
                 else if (obj.text) contentAccumulated += String(obj.text);
               } catch { /* malformed frame, ignore */ }
@@ -976,7 +992,47 @@ async function main() {
       : fail('Pinterest URL routing', `status=${status}, body=${JSON.stringify(data).slice(0, 120)}`);
   } catch (e) { fail('Pinterest URL routing', e.message); }
 
-  // ── 11. Cleanup ────────────────────────────────────────────────────────────
+  // ── 11. URL stress — representative subset of real-world URL types ────────
+  // Validates the full 4-tier import pipeline (platform APIs, scrape+AI,
+  // URL inference, screenshot fallback) by importing one URL from each
+  // major category and checking the result completes within 90s.
+  // Full 25-URL stress test lives in urlImportTest.js for ad-hoc runs.
+  section('URL stress — real-world URLs');
+
+  const STRESS_URLS = [
+    { label: 'YouTube',          url: 'https://youtu.be/ZBWMyLvkFhA' },
+    { label: 'Apple Podcasts',   url: 'https://podcasts.apple.com/us/podcast/the-rest-is-history/id1537788786' },
+    { label: 'IMDb (inference)', url: 'https://www.imdb.com/title/tt0111161/' },
+    { label: 'IKEA (inference)', url: 'https://www.ikea.com/gb/en/p/kallax-shelving-unit-white-20275806/' },
+    { label: 'BBC Good Food',    url: 'https://www.bbcgoodfood.com/recipes/best-spaghetti-bolognese-recipe' },
+    { label: 'Squarespace site', url: 'https://www.joelmeyerowitz.com/publications-/where-i-find-myself-1' },
+  ];
+
+  for (const { label, url } of STRESS_URLS) {
+    try {
+      const post = await req('POST', '/api/imports/link', {
+        token: userA.token, body: { url }, expectStatus: 202,
+      });
+      if (!post.ok || !post.data.importId) {
+        fail(`URL stress — ${label}`, `POST status=${post.status}`);
+        continue;
+      }
+      const result = await pollImport(post.data.importId, userA.token, 90_000);
+      if (result.status === 'completed' && result.productId) {
+        pass(`URL stress — ${label} completed`, `productId=${result.productId.slice(0, 8)}…`);
+      } else if (result.status === 'awaiting_confirmation') {
+        // Single-suggestion auto-accept should mean we never see this for these URLs.
+        // If we do, it's a regression in the auto-accept logic.
+        fail(`URL stress — ${label}`, 'unexpected awaiting_confirmation (auto-accept regression)');
+      } else {
+        fail(`URL stress — ${label}`, `status=${result.status}${result.error ? ` — ${result.error}` : ''}`);
+      }
+    } catch (e) {
+      fail(`URL stress — ${label}`, e.message);
+    }
+  }
+
+  // ── 12. Cleanup ────────────────────────────────────────────────────────────
   section('Cleanup');
 
   if (productId) {
