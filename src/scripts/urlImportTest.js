@@ -46,62 +46,94 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 // Each entry: { category, url, expectedTag? }
 // expectedTag is optional — when set we verify the filter tag matches.
 const URLS = [
-  // ── Personal blogs & portfolios (the failure case the user hit) ────────────
-  { category: 'Photographer portfolio', url: 'https://www.joelmeyerowitz.com/publications-/where-i-find-myself-1' },
-  { category: 'Photographer portfolio', url: 'https://www.erwinolaf.com/' },
+  // ── Books (8) ──────────────────────────────────────────────────────────────
+  { category: 'Amazon book',          url: 'https://www.amazon.co.uk/Lonesome-Dove-Larry-McMurtry/dp/0330327070' },
+  { category: 'Waterstones book',     url: 'https://www.waterstones.com/book/the-overstory/richard-powers/9781784708245' },
+  { category: 'Goodreads book',       url: 'https://www.goodreads.com/book/show/7613.Animal_Farm' },
+  { category: "Blackwell's book",     url: 'https://blackwells.co.uk/bookshop/product/9780241988268' },
+  { category: 'Bookshop.org book',    url: 'https://uk.bookshop.org/p/books/the-bee-sting-paul-murray/7476090' },
+  { category: 'Penguin classic',      url: 'https://www.amazon.co.uk/Gruffalo-Julia-Donaldson/dp/0333710932' },
+  { category: 'Cookbook',             url: 'https://www.amazon.co.uk/Ottolenghi-SIMPLE-Yotam/dp/1785031163' },
+  { category: 'Non-fiction',          url: 'https://www.amazon.co.uk/Sapiens-Humankind-Yuval-Noah-Harari/dp/0099590085' },
 
-  // ── Design & interiors blogs ───────────────────────────────────────────────
-  { category: 'Interior design blog', url: 'https://www.houseandgarden.co.uk/article/masterclass-victorian-extension-east-london-terrace' },
+  // ── Electronics & tech (5) ─────────────────────────────────────────────────
+  { category: 'Apple iPhone',         url: 'https://www.apple.com/uk/shop/buy-iphone/iphone-16-pro' },
+  { category: 'Apple MacBook',        url: 'https://www.apple.com/uk/shop/buy-mac/macbook-pro' },
+  { category: 'Amazon ASIN',          url: 'https://www.amazon.co.uk/dp/B08N5WRWNW' },
+  { category: 'YouTube short',        url: 'https://youtu.be/ZBWMyLvkFhA', expectedTag: 'YouTube' },
+  { category: 'YouTube full',         url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ', expectedTag: 'YouTube' },
+
+  // ── Home & furniture (4) ───────────────────────────────────────────────────
+  { category: 'IKEA product',         url: 'https://www.ikea.com/gb/en/p/kallax-shelving-unit-white-20275806/' },
+  { category: 'John Lewis product',   url: 'https://www.johnlewis.com/anyday-john-lewis-cotton-double-fitted-sheet-white/p4839041' },
+  { category: 'Dunelm product',       url: 'https://www.dunelm.com/product/jollein-spring-knit-cotton-blanket-75-x-100cm-1000306055' },
+  { category: 'Lakeland',             url: 'https://www.lakeland.co.uk/68037/lakeland-mini-loaf-pans' },
+
+  // ── Fashion (4) ────────────────────────────────────────────────────────────
+  { category: 'Nike trainers',        url: 'https://www.nike.com/gb/t/air-force-1-07-shoe-WrLlWX' },
+  { category: 'ASOS clothing',        url: 'https://www.asos.com/asos-design/asos-design-muscle-t-shirt-in-white/prd/8998055' },
+  { category: 'Selfridges',           url: 'https://www.selfridges.com/GB/en/cat/gucci-horsebit-1955-leather-shoulder-bag_R04209627/' },
+  { category: 'JD Sports',            url: 'https://www.jdsports.co.uk/product/black-the-north-face-mens-simple-dome-t-shirt/16143064/' },
+
+  // ── Beauty (3) ─────────────────────────────────────────────────────────────
+  { category: 'Cult Beauty',          url: 'https://www.cultbeauty.co.uk/glossier-balm-dotcom' },
+  { category: 'Sephora',              url: 'https://www.sephora.co.uk/product/rare-beauty-by-selena-gomez-soft-pinch-liquid-blush-P501401' },
+  { category: 'Boots',                url: 'https://www.boots.com/cerave-moisturising-lotion-236ml-10289814' },
+
+  // ── Recipes & food (3) ─────────────────────────────────────────────────────
+  { category: 'BBC Good Food',        url: 'https://www.bbcgoodfood.com/recipes/best-spaghetti-bolognese-recipe' },
+  { category: 'NYT Cooking',          url: 'https://cooking.nytimes.com/recipes/1017560-no-knead-bread' },
+  { category: 'Jamie Oliver',         url: 'https://www.jamieoliver.com/recipes/chicken-recipes/chicken-tikka-masala/' },
+
+  // ── Movies & TV (3) ────────────────────────────────────────────────────────
+  { category: 'IMDb title',           url: 'https://www.imdb.com/title/tt0111161/' },
+  { category: 'Rotten Tomatoes',      url: 'https://www.rottentomatoes.com/m/the_shawshank_redemption' },
+  { category: 'Letterboxd film',      url: 'https://letterboxd.com/film/parasite-2019/' },
+
+  // ── Music (3) ──────────────────────────────────────────────────────────────
+  { category: 'Spotify album',        url: 'https://open.spotify.com/album/1CuB5nB8XGgEZNkR0lz5hk' },
+  { category: 'Apple Music album',    url: 'https://music.apple.com/gb/album/random-access-memories/617154241' },
+  { category: 'Discogs release',      url: 'https://www.discogs.com/release/2255988-Pink-Floyd-The-Dark-Side-Of-The-Moon' },
+
+  // ── Podcasts (2) ───────────────────────────────────────────────────────────
+  { category: 'Apple Podcasts',       url: 'https://podcasts.apple.com/us/podcast/the-rest-is-history/id1537788786', expectedTag: 'Podcasts' },
+  { category: 'Spotify show',         url: 'https://open.spotify.com/show/2MAi0BvDc6GTFvKFPXnkCL', expectedTag: 'Podcasts' },
+
+  // ── Games (3) ──────────────────────────────────────────────────────────────
+  { category: 'Steam game',           url: 'https://store.steampowered.com/app/1245620/ELDEN_RING/', expectedTag: 'Games' },
+  { category: 'Nintendo Store',       url: 'https://www.nintendo.com/us/store/products/the-legend-of-zelda-tears-of-the-kingdom-switch/' },
+  { category: 'PlayStation Store',    url: 'https://store.playstation.com/en-gb/product/EP9000-CUSA05625_00-GHOSTSSHIPFULL00' },
+
+  // ── Apps (2) ───────────────────────────────────────────────────────────────
+  { category: 'iOS App Store',        url: 'https://apps.apple.com/us/app/things-3/id904237743', expectedTag: 'Apps' },
+  { category: 'Play Store',           url: 'https://play.google.com/store/apps/details?id=com.spotify.music' },
+
+  // ── Courses (2) ────────────────────────────────────────────────────────────
+  { category: 'Masterclass',          url: 'https://www.masterclass.com/classes/gordon-ramsay-teaches-cooking', expectedTag: 'Courses' },
+  { category: 'Coursera',             url: 'https://www.coursera.org/learn/machine-learning' },
+
+  // ── Articles / journalism (6) ──────────────────────────────────────────────
+  { category: 'Atlantic article',     url: 'https://www.theatlantic.com/technology/archive/2024/05/artificial-intelligence/678275/' },
+  { category: 'Guardian article',     url: 'https://www.theguardian.com/uk-news' },
+  { category: 'BBC News',             url: 'https://www.bbc.com/news' },
+  { category: 'Medium homepage',      url: 'https://medium.com/' },
+  { category: 'Substack blog',        url: 'https://stratechery.com/' },
   { category: 'Design blog',          url: 'https://www.dezeen.com/' },
+  { category: 'House & Garden',       url: 'https://www.houseandgarden.co.uk/article/masterclass-victorian-extension-east-london-terrace' },
 
-  // ── Long-form journalism ───────────────────────────────────────────────────
-  { category: 'Magazine article',     url: 'https://www.theatlantic.com/technology/archive/2024/05/artificial-intelligence/678275/' },
-  { category: 'News article',         url: 'https://www.bbc.com/news' },
+  // ── Photographer / portfolio sites (2) ─────────────────────────────────────
+  { category: 'Squarespace portfolio', url: 'https://www.joelmeyerowitz.com/publications-/where-i-find-myself-1' },
+  { category: 'Photographer site',     url: 'https://www.erwinolaf.com/' },
 
-  // ── Newsletter / blog platforms ────────────────────────────────────────────
-  { category: 'Substack',             url: 'https://stratechery.com/' },
-  { category: 'Medium',               url: 'https://medium.com/' },
-
-  // ── YouTube ────────────────────────────────────────────────────────────────
-  { category: 'YouTube video',        url: 'https://youtu.be/ZBWMyLvkFhA', expectedTag: 'YouTube' },
-  { category: 'YouTube video',        url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ', expectedTag: 'YouTube' },
-
-  // ── Social media ───────────────────────────────────────────────────────────
+  // ── Social media (4) ───────────────────────────────────────────────────────
   { category: 'Instagram post',       url: 'https://www.instagram.com/p/C5xYZaBz8qL/', expectedTag: 'Instagram' },
   { category: 'TikTok video',         url: 'https://www.tiktok.com/@zachking/video/7136971512639016238', expectedTag: 'TikTok' },
   { category: 'Reddit post',          url: 'https://www.reddit.com/r/DesignPorn/comments/1aabbcc/example/', expectedTag: 'Reddit' },
+  { category: 'Pinterest pin',        url: 'https://www.pinterest.co.uk/pin/3377768182/', expectedTag: 'Pinterest' },
 
-  // ── Podcasts ───────────────────────────────────────────────────────────────
-  { category: 'Apple Podcasts',       url: 'https://podcasts.apple.com/us/podcast/the-rest-is-history/id1537788786', expectedTag: 'Podcasts' },
-  { category: 'Spotify podcast',      url: 'https://open.spotify.com/show/2MAi0BvDc6GTFvKFPXnkCL', expectedTag: 'Podcasts' },
-
-  // ── E-commerce ─────────────────────────────────────────────────────────────
-  { category: 'Amazon product',       url: 'https://www.amazon.co.uk/dp/B08N5WRWNW' },
-  { category: 'IKEA product',         url: 'https://www.ikea.com/gb/en/p/kallax-shelving-unit-white-20275806/' },
-
-  // ── Courses ────────────────────────────────────────────────────────────────
-  { category: 'Masterclass',          url: 'https://www.masterclass.com/classes/gordon-ramsay-teaches-cooking', expectedTag: 'Courses' },
-
-  // ── Games ──────────────────────────────────────────────────────────────────
-  { category: 'Steam game',           url: 'https://store.steampowered.com/app/1245620/ELDEN_RING/', expectedTag: 'Games' },
-
-  // ── Apps ───────────────────────────────────────────────────────────────────
-  { category: 'iOS App Store',        url: 'https://apps.apple.com/us/app/things-3/id904237743', expectedTag: 'Apps' },
-
-  // ── Books ──────────────────────────────────────────────────────────────────
-  { category: 'Goodreads book',       url: 'https://www.goodreads.com/book/show/7613.Animal_Farm' },
-
-  // ── Music ──────────────────────────────────────────────────────────────────
-  { category: 'Spotify album',        url: 'https://open.spotify.com/album/1CuB5nB8XGgEZNkR0lz5hk' },
-
-  // ── Places / Maps ──────────────────────────────────────────────────────────
+  // ── Places & maps (2) ──────────────────────────────────────────────────────
   { category: 'Google Maps',          url: 'https://maps.google.com/?q=Dishoom+Covent+Garden+London' },
-
-  // ── Recipes ────────────────────────────────────────────────────────────────
-  { category: 'Recipe',               url: 'https://www.bbcgoodfood.com/recipes/best-spaghetti-bolognese-recipe' },
-
-  // ── Movies / TV ────────────────────────────────────────────────────────────
-  { category: 'IMDb title',           url: 'https://www.imdb.com/title/tt0111161/' },
+  { category: 'OpenStreetMap',        url: 'https://www.openstreetmap.org/node/4302358186' },
 ];
 
 // ── HTTP helper ──────────────────────────────────────────────────────────────
