@@ -689,10 +689,17 @@ async function processImport(importId, { userId, sourceType, sourceUrl, screensh
             name: inferred.name,
             confidence: inferred.confidence,
           });
+          // Boost confidence above auto-accept threshold when inference is
+          // reasonably sure — this is already a last-resort path, and asking
+          // the user to "confirm" a single suggestion is just friction.
+          const boostedConfidence = (inferred.confidence ?? 0) >= 0.5
+            ? Math.max(inferred.confidence, 0.8)
+            : inferred.confidence;
           // Merge inferred data with any partial scraped data we might have
           extractedData = {
             ...(extractedData || {}),
             ...inferred,
+            confidence: boostedConfidence,
             // Preserve any image we did manage to scrape
             image_url: extractedData?.image_url || inferred.image_url,
             images: (extractedData?.images?.length ? extractedData.images : inferred.images) || [],
@@ -740,9 +747,15 @@ async function processImport(importId, { userId, sourceType, sourceUrl, screensh
               name: visionData.name,
               confidence: visionData.confidence,
             });
+            // Same boost as URL inference: this is the LAST resort, so if vision
+            // is reasonably sure, commit to the answer and skip user confirmation.
+            const boostedConfidence = (visionData.confidence ?? 0) >= 0.5
+              ? Math.max(visionData.confidence, 0.8)
+              : visionData.confidence;
             extractedData = {
               ...(extractedData || {}),
               ...visionData,
+              confidence: boostedConfidence,
             };
             // Final OG image attempt in case screenshot-AI didn't return one
             if (!extractedData.image_url) {
@@ -831,6 +844,22 @@ async function processImport(importId, { userId, sourceType, sourceUrl, screensh
     const suggestions = [extractedData];
     if (existingProduct) {
       suggestions.unshift({ ...existingProduct, confidence: 0.9 });
+    }
+
+    // If there's only ONE suggestion (no existing match), there's nothing for
+    // the user to choose between — auto-accept rather than blocking on a fake
+    // confirmation dialog. Better to save and let the user edit if it's wrong.
+    if (suggestions.length === 1 && !existingProduct) {
+      logger.info('Single-suggestion auto-accept', { importId, name: extractedData.name });
+      const productId = await createProduct(extractedData, sourceUrl, sourceType);
+      aiService.generateSuggestedQuestions(extractedData).then(questions => {
+        if (Array.isArray(questions) && questions.length > 0) {
+          query('UPDATE products SET suggested_questions = $1 WHERE id = $2',
+            [JSON.stringify(questions), productId]).catch(() => {});
+        }
+      }).catch(() => {});
+      await finaliseImport(importId, userId, productId, sourceUrl, sourceType, screenshotKey);
+      return;
     }
 
     await query(
