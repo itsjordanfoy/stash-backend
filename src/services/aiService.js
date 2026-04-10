@@ -75,7 +75,7 @@ async function extractProductFromUrl(url, htmlContent = null, ogData = null, cat
         role: 'user',
         content: `Extract information from this web page and return a JSON object. Use the item_type that best fits:${categoryInstruction}
 {
-  "name": "item name",
+  "name": "SHORT name — max 50 chars, punchy and specific. For articles/blogs rewrite the headline into a concise memorable title (e.g. 'Victorian House Extension Masterclass' not the full article title). For social posts extract the actual subject (restaurant name, product, place). Never include the site name, author, username, or source platform in the name.",
   "item_type": "product" | "place" | "entertainment" | "event" | "general" | "course" | "podcast" | "youtube_video" | "video_game" | "wine" | "article" | "app",
   "brand": "brand or publisher (products/books only, else null)",
   "description": "brief description (max 200 chars)",
@@ -257,7 +257,7 @@ async function analyzeScreenshot(imageBase64, mimeType = 'image/png') {
             type: 'text',
             text: `Analyse this screenshot and extract information. Return a JSON object:
 {
-  "name": "item name",
+  "name": "SHORT name — max 50 chars, punchy and specific. For articles rewrite the headline into a concise title. Never include the site name, author, or source platform.",
   "item_type": "product" | "place" | "entertainment" | "event" | "general" | "course" | "podcast" | "youtube_video" | "video_game" | "wine" | "article" | "app",
   "brand": "brand or publisher (products only, else null)",
   "description": "brief description",

@@ -668,6 +668,11 @@ async function processImport(importId, { userId, sourceType, sourceUrl, screensh
       }
     }
 
+    // Safety net: truncate names that are still too long despite the AI prompt instruction.
+    if (extractedData?.name && extractedData.name.length > 80) {
+      extractedData.name = extractedData.name.slice(0, 77).trimEnd() + '…';
+    }
+
     if (!extractedData || extractedData.confidence < 0.2) {
       const failMsg = sourceUrl
         ? 'We couldn\'t extract enough information from this link. Try sharing a screenshot of the page instead.'
