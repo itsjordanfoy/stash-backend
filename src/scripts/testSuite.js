@@ -12,6 +12,10 @@
  * │    TEST_BASE_URL=https://api.stash.app node ...         │
  * │                                                         │
  * │  Exit code: 0 = all passed, 1 = failures present        │
+ * │                                                         │
+ * │  Output includes a PM-friendly summary block between    │
+ * │  ===== PM SUMMARY START ===== / END markers so the      │
+ * │  scheduled task can surface it cleanly in chat.         │
  * └─────────────────────────────────────────────────────────┘
  */
 
@@ -20,14 +24,16 @@ require('dotenv').config({
   override: true,
 });
 
-const fs   = require('fs');
-const path = require('path');
+const fs     = require('fs');
+const path   = require('path');
+const crypto = require('crypto');
 
 const BASE_URL   = process.env.TEST_BASE_URL || 'http://localhost:3000';
 const JSON_MODE  = process.argv.includes('--json');
 const LOG_DIR    = path.resolve(__dirname, '../../logs');
 const TS         = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
 const LOG_FILE   = path.join(LOG_DIR, `test-${TS}.log`);
+const ADMIN_SECRET = process.env.ADMIN_SECRET || '';
 
 // ── ANSI helpers ──────────────────────────────────────────────────────────────
 const C = {
@@ -51,6 +57,25 @@ let failed   = 0;
 let skipped  = 0;
 const results = [];
 const logLines = [];
+let currentSection = 'General';
+
+// Severity mapping per section — governs the PM summary priority ordering.
+// critical = blocks deploy, degraded = ship with warning, minor = backlog
+const SECTION_SEVERITY = {
+  'Health':                  'degraded',
+  'Auth':                    'critical',
+  'Products — empty state':  'degraded',
+  'Import — link':           'degraded',
+  'Fixtures — alt paths':    'degraded',
+  'Products — post-import':  'degraded',
+  'Two-user isolation':      'critical',
+  'Boards':                  'degraded',
+  'Search':                  'degraded',
+  'Notifications':           'minor',
+  'Subscriptions':           'minor',
+  'Social URL handling':     'minor',
+  'Cleanup':                 'minor',
+};
 
 function emit(line) {
   console.log(line);
@@ -58,25 +83,32 @@ function emit(line) {
 }
 
 function section(name) {
+  currentSection = name;
   emit(`\n${c.bold}${c.cyan}▸ ${name}${c.reset}`);
 }
 
 function pass(name, detail = '') {
   passed++;
-  results.push({ status: 'pass', name });
+  results.push({ status: 'pass', name, section: currentSection });
   emit(`  ${c.green}✓${c.reset} ${name}${detail ? `  ${c.dim}${detail}${c.reset}` : ''}`);
 }
 
 function fail(name, reason = '') {
   failed++;
-  results.push({ status: 'fail', name, reason });
+  results.push({
+    status: 'fail',
+    name,
+    reason,
+    section: currentSection,
+    severity: SECTION_SEVERITY[currentSection] || 'degraded',
+  });
   emit(`  ${c.red}✗${c.reset} ${name}`);
   if (reason) emit(`    ${c.dim}↳ ${reason}${c.reset}`);
 }
 
 function skip(name, reason = '') {
   skipped++;
-  results.push({ status: 'skip', name, reason });
+  results.push({ status: 'skip', name, reason, section: currentSection });
   emit(`  ${c.yellow}⟳${c.reset} ${name}  ${c.dim}(skipped: ${reason})${c.reset}`);
 }
 
@@ -121,10 +153,67 @@ async function pollImport(importId, token, timeoutMs = 90_000) {
   return { status: 'timeout' };
 }
 
+// ── Admin cleanup helper ──────────────────────────────────────────────────────
+// Non-fatal: if the endpoint is missing or errors, log a warning and continue.
+// The endpoint only deletes accounts matching stash_test_%@test.internal older
+// than the given window, so it's structurally incapable of touching real data.
+async function cleanupTestUsers(olderThanMinutes, label) {
+  if (!ADMIN_SECRET) {
+    emit(`  ${c.dim}(cleanup skipped: no ADMIN_SECRET)${c.reset}`);
+    return { skipped: true };
+  }
+  try {
+    const res = await fetch(`${BASE_URL}/admin/cleanup-test-users`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-admin-secret': ADMIN_SECRET,
+      },
+      body: JSON.stringify({ olderThanMinutes }),
+    });
+    if (!res.ok) {
+      emit(`  ${c.yellow}⟳${c.reset} Cleanup (${label}) warning: status=${res.status}`);
+      return { warning: true };
+    }
+    const data = await res.json();
+    emit(`  ${c.dim}Cleanup (${label}): deleted=${data.deleted ?? 0}${c.reset}`);
+    return data;
+  } catch (err) {
+    emit(`  ${c.yellow}⟳${c.reset} Cleanup (${label}) warning: ${err.message}`);
+    return { warning: true, error: err.message };
+  }
+}
+
 // ── Unique test identity ──────────────────────────────────────────────────────
-const RUN_ID   = Date.now();
-const EMAIL    = `stash_test_${RUN_ID}@test.internal`;
-const PASSWORD = 'TestPass!9x';
+const RUN_ID = `${Date.now()}_${crypto.randomUUID().slice(0, 8)}`;
+const userA = {
+  email: `stash_test_${RUN_ID}_A@test.internal`,
+  password: 'TestPass!9x',
+  token: null,
+  id: null,
+};
+const userB = {
+  email: `stash_test_${RUN_ID}_B@test.internal`,
+  password: 'TestPass!9x',
+  token: null,
+  id: null,
+};
+
+// ── Register helper (used for both users) ────────────────────────────────────
+async function registerUser(user, label) {
+  const { data, ok, status } = await req('POST', '/api/auth/register', {
+    body: { email: user.email, password: user.password, displayName: `Test Runner ${label}` },
+    expectStatus: 201,
+  });
+  if (ok && data.token) {
+    user.token = data.token;
+    user.id = data.user?.id;
+    pass(`POST /api/auth/register [${label}] → 201`, `userId=${user.id?.slice(0, 8)}…`);
+    return true;
+  }
+  fail(`POST /api/auth/register [${label}]`, `status=${status} — ${JSON.stringify(data).slice(0, 120)}`);
+  return false;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // MAIN
@@ -134,11 +223,17 @@ async function main() {
   emit(`${c.bold}${c.white}║  Stash Backend Test Suite — ${new Date().toUTCString().slice(0,16)}  ║${c.reset}`);
   emit(`${c.bold}${c.white}╚═══════════════════════════════════════════╝${c.reset}`);
   emit(`${c.dim}  Target : ${BASE_URL}${c.reset}`);
-  emit(`${c.dim}  User   : ${EMAIL}${c.reset}`);
+  emit(`${c.dim}  UserA  : ${userA.email}${c.reset}`);
+  emit(`${c.dim}  UserB  : ${userB.email}${c.reset}`);
 
-  let token     = null;
-  let productId = null;
-  let boardId   = null;
+  // Pre-run cleanup — purge any stash_test_* users older than 5 min from
+  // crashed prior runs. Non-fatal if the endpoint isn't available.
+  emit(`\n${c.dim}Pre-run cleanup…${c.reset}`);
+  await cleanupTestUsers(5, 'pre-run');
+
+  let productId = null;          // user A's imported product
+  let boardId   = null;          // user A's test board
+  let productName = '';          // for deep validation reuse
 
   // ── 1. Health ──────────────────────────────────────────────────────────────
   section('Health');
@@ -152,30 +247,22 @@ async function main() {
   // ── 2. Auth ────────────────────────────────────────────────────────────────
   section('Auth');
 
-  // Register fresh test user
-  try {
-    const { data, ok, status } = await req('POST', '/api/auth/register', {
-      body: { email: EMAIL, password: PASSWORD, displayName: 'Test Runner' },
-      expectStatus: 201,
-    });
-    if (ok && data.token) {
-      token = data.token;
-      pass('POST /api/auth/register → 201', `userId=${data.user?.id?.slice(0, 8)}…`);
-    } else {
-      fail('POST /api/auth/register', `status=${status} — ${JSON.stringify(data).slice(0, 120)}`);
-    }
-  } catch (e) { fail('POST /api/auth/register', e.message); }
-
-  if (!token) {
-    emit(`\n${c.red}${c.bold}  Cannot continue without auth token.${c.reset}\n`);
-    printSummary();
-    process.exit(1);
+  // Register both users up front. UserA is the primary; UserB exists for
+  // the isolation tests later.
+  const userARegistered = await registerUser(userA, 'A');
+  if (!userARegistered) {
+    emit(`\n${c.red}${c.bold}  Cannot continue without userA token.${c.reset}\n`);
+    return;
+  }
+  const userBRegistered = await registerUser(userB, 'B');
+  if (!userBRegistered) {
+    emit(`\n${c.red}${c.bold}  userB registration failed — isolation tests will be skipped.${c.reset}\n`);
   }
 
-  // Login
+  // Login (userA)
   try {
     const { data, ok, status } = await req('POST', '/api/auth/login', {
-      body: { email: EMAIL, password: PASSWORD },
+      body: { email: userA.email, password: userA.password },
     });
     ok && data.token
       ? pass('POST /api/auth/login → 200')
@@ -185,7 +272,7 @@ async function main() {
   // Wrong password
   try {
     const { status } = await req('POST', '/api/auth/login', {
-      body: { email: EMAIL, password: 'WrongPassword1' },
+      body: { email: userA.email, password: 'WrongPassword1' },
       expectStatus: 401,
     });
     status === 401 ? pass('Wrong password → 401') : fail('Wrong password rejection', `got ${status}`);
@@ -199,15 +286,15 @@ async function main() {
 
   // GET /api/users/me
   try {
-    const { data, ok } = await req('GET', '/api/users/me', { token });
-    ok && data.email === EMAIL
+    const { data, ok } = await req('GET', '/api/users/me', { token: userA.token });
+    ok && data.email === userA.email
       ? pass('GET /api/users/me')
       : fail('GET /api/users/me', JSON.stringify(data).slice(0, 120));
   } catch (e) { fail('GET /api/users/me', e.message); }
 
   // GET /api/users/me/stats
   try {
-    const { data, ok } = await req('GET', '/api/users/me/stats', { token });
+    const { data, ok } = await req('GET', '/api/users/me/stats', { token: userA.token });
     ok ? pass('GET /api/users/me/stats') : fail('GET /api/users/me/stats', JSON.stringify(data).slice(0, 120));
   } catch (e) { fail('GET /api/users/me/stats', e.message); }
 
@@ -215,14 +302,14 @@ async function main() {
   section('Products — empty state');
 
   try {
-    const { data, ok } = await req('GET', '/api/products/recent?limit=20', { token });
+    const { data, ok } = await req('GET', '/api/products/recent?limit=20', { token: userA.token });
     ok && Array.isArray(data.products) && data.products.length === 0
       ? pass('GET /api/products/recent → empty array')
       : fail('GET /api/products/recent (empty)', JSON.stringify(data).slice(0, 120));
   } catch (e) { fail('GET /api/products/recent (empty)', e.message); }
 
   try {
-    const { data, ok } = await req('GET', '/api/products/search?q=chair', { token });
+    const { data, ok } = await req('GET', '/api/products/search?q=chair', { token: userA.token });
     ok && Array.isArray(data.products)
       ? pass('GET /api/products/search (empty)', `${data.products.length} results`)
       : fail('GET /api/products/search (empty)', JSON.stringify(data).slice(0, 120));
@@ -231,7 +318,7 @@ async function main() {
   // 404 for unknown product
   try {
     const { status } = await req('GET', '/api/products/00000000-0000-0000-0000-000000000000', {
-      token, expectStatus: 404,
+      token: userA.token, expectStatus: 404,
     });
     status === 404 ? pass('GET /api/products/:id unknown → 404') : fail('Unknown product 404', `got ${status}`);
   } catch (e) { fail('Unknown product 404', e.message); }
@@ -241,30 +328,30 @@ async function main() {
 
   // Missing URL body
   try {
-    const { status } = await req('POST', '/api/imports/link', { token, body: {}, expectStatus: 400 });
+    const { status } = await req('POST', '/api/imports/link', { token: userA.token, body: {}, expectStatus: 400 });
     status === 400 ? pass('Missing URL → 400') : fail('Missing URL rejection', `got ${status}`);
   } catch (e) { fail('Missing URL rejection', e.message); }
 
   // Invalid URL
   try {
     const { status } = await req('POST', '/api/imports/link', {
-      token, body: { url: 'not-a-real-url' }, expectStatus: 400,
+      token: userA.token, body: { url: 'not-a-real-url' }, expectStatus: 400,
     });
     status === 400 ? pass('Invalid URL format → 400') : fail('Invalid URL rejection', `got ${status}`);
   } catch (e) { fail('Invalid URL rejection', e.message); }
 
-  // Real product import (IKEA — stable, OG-rich, fast)
-  const IMPORT_URL = 'https://www.ikea.com/gb/en/p/kallax-shelf-unit-white-00275862/';
+  // Real product import using self-hosted fixture (no external dependency)
+  const IMPORT_URL = `${BASE_URL}/test-fixtures/kallax.html`;
   let importId = null;
   try {
     const { data, ok, status } = await req('POST', '/api/imports/link', {
-      token,
+      token: userA.token,
       body: { url: IMPORT_URL },
       expectStatus: 202,
     });
     if (ok && data.importId) {
       importId = data.importId;
-      pass(`POST /api/imports/link → 202`, `importId=${importId.slice(0, 8)}…`);
+      pass(`POST /api/imports/link → 202`, `fixture kallax.html, importId=${importId.slice(0, 8)}…`);
     } else {
       fail('POST /api/imports/link', `status=${status} — ${JSON.stringify(data).slice(0, 120)}`);
     }
@@ -273,7 +360,7 @@ async function main() {
   // GET /api/imports/:id — immediate status check (should be processing)
   if (importId) {
     try {
-      const { data, ok } = await req('GET', `/api/imports/${importId}`, { token });
+      const { data, ok } = await req('GET', `/api/imports/${importId}`, { token: userA.token });
       ok && ['processing', 'pending', 'completed'].includes(data.status)
         ? pass(`GET /api/imports/:id → status="${data.status}"`)
         : fail('GET /api/imports/:id', JSON.stringify(data).slice(0, 120));
@@ -284,7 +371,7 @@ async function main() {
   if (importId) {
     emit(`\n  ${c.dim}  Polling import (up to 90s)…${c.reset}`);
     try {
-      const result = await pollImport(importId, token);
+      const result = await pollImport(importId, userA.token);
       switch (result.status) {
         case 'completed':
           if (result.productId) {
@@ -296,11 +383,10 @@ async function main() {
           break;
 
         case 'awaiting_confirmation': {
-          // Auto-confirm first suggestion (simulates user picking a match)
           const suggestion = result.suggestions?.[0];
           if (suggestion) {
             const { data, ok } = await req('POST', `/api/imports/${importId}/confirm`, {
-              token,
+              token: userA.token,
               body: { productData: suggestion },
             });
             if (ok && data.productId) {
@@ -326,7 +412,45 @@ async function main() {
     } catch (e) { fail('Import polling', e.message); }
   }
 
-  // ── 5. Products — post-import ──────────────────────────────────────────────
+  // ── 4b. Alternative fixture paths ──────────────────────────────────────────
+  // Exercise the JSON-LD, minimal, and broken fallback paths of the scraper.
+  section('Fixtures — alt paths');
+
+  async function importAndAwait(url, label, { allowStatuses = ['completed', 'awaiting_confirmation'] } = {}) {
+    try {
+      const { data, ok, status } = await req('POST', '/api/imports/link', {
+        token: userA.token,
+        body: { url },
+        expectStatus: 202,
+      });
+      if (!ok || !data.importId) {
+        fail(`Import ${label}`, `accept status=${status}, body=${JSON.stringify(data).slice(0, 120)}`);
+        return null;
+      }
+      const result = await pollImport(data.importId, userA.token);
+      if (allowStatuses.includes(result.status)) {
+        pass(`Import ${label} → ${result.status}`);
+        return result;
+      }
+      fail(`Import ${label} ended in ${result.status}`, result.error ?? '');
+      return null;
+    } catch (e) {
+      fail(`Import ${label}`, e.message);
+      return null;
+    }
+  }
+
+  await importAndAwait(`${BASE_URL}/test-fixtures/chair-jsonld.html`, 'chair-jsonld');
+  await importAndAwait(`${BASE_URL}/test-fixtures/minimal.html`, 'minimal', {
+    allowStatuses: ['completed', 'awaiting_confirmation', 'failed'],
+  });
+  // broken.html — the ONLY unacceptable outcome is a server crash/timeout.
+  // failed / completed / awaiting_confirmation are all fine.
+  await importAndAwait(`${BASE_URL}/test-fixtures/broken.html`, 'broken (malformed)', {
+    allowStatuses: ['completed', 'awaiting_confirmation', 'failed'],
+  });
+
+  // ── 5. Products — post-import + deep validation ───────────────────────────
   section('Products — post-import');
 
   if (!productId) {
@@ -334,7 +458,7 @@ async function main() {
   } else {
     // Recent list includes new product
     try {
-      const { data, ok } = await req('GET', '/api/products/recent?limit=20', { token });
+      const { data, ok } = await req('GET', '/api/products/recent?limit=20', { token: userA.token });
       if (ok && data.products?.some(p => p.id === productId)) {
         pass('GET /api/products/recent — new product present');
       } else if (ok) {
@@ -344,18 +468,77 @@ async function main() {
       }
     } catch (e) { fail('GET /api/products/recent (post-import)', e.message); }
 
-    // GET /api/products/:id
-    let productName = '';
+    // Deep data validation
     try {
-      const { data, ok } = await req('GET', `/api/products/${productId}`, { token });
+      const { data, ok } = await req('GET', `/api/products/${productId}`, { token: userA.token });
       if (ok && data.id === productId) {
         productName = data.name ?? '';
         pass(`GET /api/products/:id`, `"${productName.slice(0, 40)}"`);
-        // Validate key fields
-        if (!data.name) fail('Product has no name');
-        else pass('Product.name present');
-        if (data.retailers !== undefined) pass(`Product.retailers present (${data.retailers.length})`);
-        else fail('Product.retailers missing');
+
+        // Name present
+        if (productName && productName.trim().length > 0) {
+          pass('Deep: product.name present');
+        } else {
+          fail('Deep: product.name missing or empty');
+        }
+
+        // Retailers array shape
+        if (Array.isArray(data.retailers) && data.retailers.length >= 1) {
+          pass(`Deep: product.retailers present (${data.retailers.length})`);
+
+          const r0 = data.retailers[0];
+
+          // Price > 0
+          const price = typeof r0.price === 'string' ? parseFloat(r0.price) : r0.price;
+          if (typeof price === 'number' && Number.isFinite(price) && price > 0) {
+            pass(`Deep: retailer price > 0 (${price})`);
+          } else {
+            fail('Deep: retailer price invalid or ≤ 0', `price=${r0.price}`);
+          }
+
+          // Currency ISO code
+          if (typeof r0.currency === 'string' && /^[A-Z]{3}$/.test(r0.currency)) {
+            pass(`Deep: retailer currency is ISO (${r0.currency})`);
+          } else {
+            fail('Deep: retailer currency not ISO-3', `currency=${r0.currency}`);
+          }
+
+          // Retailer URL contains BASE_URL host (same origin as fixture)
+          if (typeof r0.url === 'string' && r0.url.length > 0) {
+            try {
+              const retailerHost = new URL(r0.url).host;
+              const baseHost = new URL(BASE_URL).host;
+              if (retailerHost === baseHost || r0.url.includes(baseHost)) {
+                pass(`Deep: retailer URL on fixture host (${retailerHost})`);
+              } else {
+                fail('Deep: retailer URL host mismatch', `${retailerHost} vs ${baseHost}`);
+              }
+            } catch {
+              fail('Deep: retailer URL not parseable', r0.url);
+            }
+          } else {
+            fail('Deep: retailer URL missing');
+          }
+        } else {
+          fail('Deep: product.retailers missing or empty');
+        }
+
+        // Image URL liveness (optional — null is acceptable)
+        if (data.image_url) {
+          try {
+            const headRes = await fetch(data.image_url, { method: 'HEAD' });
+            const ct = headRes.headers.get('content-type') ?? '';
+            if (headRes.status === 200 && ct.startsWith('image/')) {
+              pass(`Deep: image_url HEAD 200 (${ct.split(';')[0]})`);
+            } else {
+              fail('Deep: image_url HEAD failed', `status=${headRes.status}, ct=${ct}`);
+            }
+          } catch (e) {
+            fail('Deep: image_url fetch error', e.message);
+          }
+        } else {
+          emit(`    ${c.dim}(image_url is null — skipping HEAD check)${c.reset}`);
+        }
       } else {
         fail('GET /api/products/:id', JSON.stringify(data).slice(0, 120));
       }
@@ -364,73 +547,141 @@ async function main() {
     // GET /api/products/search — should surface the new product
     try {
       const q = encodeURIComponent(productName.split(' ')[0] || 'KALLAX');
-      const { data, ok } = await req('GET', `/api/products/search?q=${q}`, { token });
+      const { data, ok } = await req('GET', `/api/products/search?q=${q}`, { token: userA.token });
       ok && Array.isArray(data.products)
         ? pass(`GET /api/products/search?q=${q}`, `${data.products.length} result(s)`)
         : fail('GET /api/products/search', JSON.stringify(data).slice(0, 120));
     } catch (e) { fail('GET /api/products/search', e.message); }
 
-    // PATCH notes
+    // PATCH notes — with read-after-write verification
+    const TEST_NOTE = 'Automated test note — safe to delete.';
     try {
       const { ok, status } = await req('PATCH', `/api/products/${productId}/notes`, {
-        token, body: { notes: 'Automated test note — safe to delete.' },
+        token: userA.token, body: { notes: TEST_NOTE },
       });
-      ok ? pass('PATCH /api/products/:id/notes') : fail('PATCH notes', `status=${status}`);
+      if (!ok) {
+        fail('PATCH notes', `status=${status}`);
+      } else {
+        pass('PATCH /api/products/:id/notes');
+        // Read-after-write
+        const { data: after, ok: getOk } = await req('GET', `/api/products/${productId}`, { token: userA.token });
+        if (getOk && after.notes === TEST_NOTE) {
+          pass('Read-after-write: notes saved correctly');
+        } else {
+          fail('Read-after-write: notes not persisted', `expected="${TEST_NOTE}", got="${after.notes}"`);
+        }
+      }
     } catch (e) { fail('PATCH notes', e.message); }
 
-    // Clear notes
+    // Clear notes + read-after-write
     try {
       const { ok } = await req('PATCH', `/api/products/${productId}/notes`, {
-        token, body: { notes: '' },
+        token: userA.token, body: { notes: '' },
       });
-      ok ? pass('PATCH /api/products/:id/notes (clear)') : fail('PATCH notes (clear)', 'failed');
+      if (!ok) {
+        fail('PATCH notes (clear)', 'failed');
+      } else {
+        pass('PATCH /api/products/:id/notes (clear)');
+        const { data: after } = await req('GET', `/api/products/${productId}`, { token: userA.token });
+        if (after.notes === '' || after.notes === null || after.notes === undefined) {
+          pass('Read-after-write: notes cleared');
+        } else {
+          fail('Read-after-write: notes not cleared', `got="${after.notes}"`);
+        }
+      }
     } catch (e) { fail('PATCH notes (clear)', e.message); }
 
-    // POST /api/products/:id/auto-board
+    // POST /api/products/:id/auto-board — with read-after-write
     try {
       const { data, ok } = await req('POST', `/api/products/${productId}/auto-board`, {
-        token, body: {},
+        token: userA.token, body: {},
       });
-      ok
-        ? pass('POST /api/products/:id/auto-board', `suggestion="${data.board?.name ?? 'none'}"`)
-        : fail('POST auto-board', JSON.stringify(data).slice(0, 120));
+      if (!ok) {
+        fail('POST auto-board', JSON.stringify(data).slice(0, 120));
+      } else {
+        const suggestedBoardId = data.board?.id;
+        pass('POST /api/products/:id/auto-board', `suggestion="${data.board?.name ?? 'none'}"`);
+        // Read-after-write: verify the product is actually in the board
+        if (suggestedBoardId) {
+          const { data: boardData, ok: getOk } = await req('GET', `/api/boards/${suggestedBoardId}`, { token: userA.token });
+          if (getOk && boardData.products?.some(p => p.id === productId)) {
+            pass('Read-after-write: auto-board added product');
+          } else {
+            fail('Read-after-write: auto-board did not add product', `board products=${JSON.stringify(boardData.products?.map(p => p.id))}`);
+          }
+        }
+      }
     } catch (e) { fail('POST auto-board', e.message); }
 
-    // POST /api/products/:id/ask — SSE streaming
+    // POST /api/products/:id/ask — SSE streaming (DEEP validation)
     try {
       const res = await fetch(`${BASE_URL}/api/products/${productId}/ask`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`,
+          'Authorization': `Bearer ${userA.token}`,
         },
-        body: JSON.stringify({ question: '💡 What is this product used for?' }),
-        signal: AbortSignal.timeout(30_000),
+        body: JSON.stringify({ question: 'What is this product used for?' }),
+        signal: AbortSignal.timeout(45_000),
       });
 
       if (res.status === 200 && res.headers.get('content-type')?.includes('text/event-stream')) {
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         let raw = '';
-        let tokenCount = 0;
+        let contentAccumulated = '';
         let done = false;
+        let sawDone = false;
 
-        while (!done && tokenCount < 5) {
+        while (!done) {
           const { value, done: d } = await reader.read();
           done = d;
           if (value) {
             raw += decoder.decode(value, { stream: true });
-            tokenCount += (raw.match(/data: \{/g) || []).length;
+            // Extract content tokens from SSE frames
+            const frames = raw.split('\n\n');
+            raw = frames.pop() || '';
+            for (const frame of frames) {
+              const dataLine = frame.split('\n').find(l => l.startsWith('data: '));
+              if (!dataLine) continue;
+              const payload = dataLine.slice(6).trim();
+              if (payload === '[DONE]') {
+                sawDone = true;
+                continue;
+              }
+              try {
+                const obj = JSON.parse(payload);
+                if (typeof obj.content === 'string') contentAccumulated += obj.content;
+                else if (typeof obj.delta === 'string') contentAccumulated += obj.delta;
+                else if (obj.text) contentAccumulated += String(obj.text);
+              } catch { /* malformed frame, ignore */ }
+            }
           }
         }
-        reader.cancel();
 
-        const hasDone   = raw.includes('[DONE]') || done;
-        const hasTokens = raw.includes('data: {');
-        if (hasTokens) {
-          pass('POST /api/products/:id/ask — SSE streaming', `≥${tokenCount} token(s) received`);
+        pass('POST /api/products/:id/ask — SSE opened');
+
+        if (sawDone) {
+          pass('SSE: [DONE] sentinel received');
         } else {
-          fail('POST /api/products/:id/ask', `No token data in SSE stream. raw=${raw.slice(0, 200)}`);
+          fail('SSE: [DONE] sentinel missing', 'stream ended without [DONE]');
+        }
+
+        if (contentAccumulated.length > 50) {
+          pass(`SSE: meaningful content (${contentAccumulated.length} chars)`);
+        } else {
+          fail('SSE: content too short', `got ${contentAccumulated.length} chars: "${contentAccumulated.slice(0, 120)}"`);
+        }
+
+        // Sanity: response mentions at least one word from the product name
+        const nameWords = productName.toLowerCase().split(/\s+/).filter(w => w.length >= 4);
+        const answerLower = contentAccumulated.toLowerCase();
+        const hasNameWord = nameWords.some(w => answerLower.includes(w));
+        if (nameWords.length === 0 || hasNameWord) {
+          pass('SSE: answer references product name');
+        } else {
+          // Non-fatal warning — the AI may paraphrase.
+          emit(`    ${c.yellow}⟳${c.reset} SSE: answer did not mention product name (soft warning)`);
         }
       } else {
         const text = await res.text().catch(() => '');
@@ -441,14 +692,14 @@ async function main() {
     // POST /api/products/:id/ask — missing question → 400
     try {
       const { status } = await req('POST', `/api/products/${productId}/ask`, {
-        token, body: {}, expectStatus: 400,
+        token: userA.token, body: {}, expectStatus: 400,
       });
       status === 400 ? pass('POST ask missing question → 400') : fail('Ask missing question', `got ${status}`);
     } catch (e) { fail('Ask missing question', e.message); }
 
     // GET /api/prices/:id/history
     try {
-      const { data, ok } = await req('GET', `/api/prices/${productId}/history`, { token });
+      const { data, ok } = await req('GET', `/api/prices/${productId}/history`, { token: userA.token });
       ok
         ? pass('GET /api/prices/:id/history', `${data.history?.length ?? 0} data point(s)`)
         : fail('GET /api/prices/:id/history', JSON.stringify(data).slice(0, 120));
@@ -456,12 +707,96 @@ async function main() {
 
     // Enable / disable price tracking
     try {
-      const { ok: trackOk } = await req('POST', `/api/prices/${productId}/track`, { token, body: {} });
+      const { ok: trackOk } = await req('POST', `/api/prices/${productId}/track`, { token: userA.token, body: {} });
       trackOk ? pass('POST /api/prices/:id/track (enable)') : fail('POST price track enable', 'failed');
 
-      const { ok: untrackOk } = await req('DELETE', `/api/prices/${productId}/track`, { token, expectStatus: 200 });
+      const { ok: untrackOk } = await req('DELETE', `/api/prices/${productId}/track`, { token: userA.token, expectStatus: 200 });
       untrackOk ? pass('DELETE /api/prices/:id/track (disable)') : fail('DELETE price track disable', 'failed');
     } catch (e) { fail('Price tracking', e.message); }
+  }
+
+  // ── 5b. Two-user isolation ────────────────────────────────────────────────
+  section('Two-user isolation');
+
+  if (!productId || !userB.token) {
+    skip('All isolation tests', !productId ? 'no productId' : 'userB not registered');
+  } else {
+    // userB recent list must not contain userA's product
+    try {
+      const { data, ok } = await req('GET', '/api/products/recent?limit=20', { token: userB.token });
+      if (ok && !data.products?.some(p => p.id === productId)) {
+        pass('userB GET /api/products/recent — userA product NOT visible');
+      } else if (ok) {
+        fail('Isolation: userB sees userA product in recent list', `products=${JSON.stringify(data.products?.map(p => p.id))}`);
+      } else {
+        fail('userB GET /api/products/recent', JSON.stringify(data).slice(0, 120));
+      }
+    } catch (e) { fail('userB GET /api/products/recent', e.message); }
+
+    // userB search must not contain userA's product
+    try {
+      const q = encodeURIComponent(productName.split(' ')[0] || 'KALLAX');
+      const { data, ok } = await req('GET', `/api/products/search?q=${q}`, { token: userB.token });
+      if (ok && !data.products?.some(p => p.id === productId)) {
+        pass('userB GET /api/products/search — userA product NOT in results');
+      } else if (ok) {
+        fail('Isolation: userB search surfaces userA product', `products=${JSON.stringify(data.products?.map(p => p.id))}`);
+      } else {
+        fail('userB GET /api/products/search', JSON.stringify(data).slice(0, 120));
+      }
+    } catch (e) { fail('userB GET /api/products/search', e.message); }
+
+    // userB GET /api/products/:id → 404
+    try {
+      const { status } = await req('GET', `/api/products/${productId}`, {
+        token: userB.token, expectStatus: 404,
+      });
+      status === 404
+        ? pass('userB GET /api/products/:id → 404')
+        : fail('Isolation: userB can fetch userA product', `got ${status}`);
+    } catch (e) { fail('userB GET /api/products/:id', e.message); }
+
+    // userB POST /api/products/:id/ask → 404
+    try {
+      const { status } = await req('POST', `/api/products/${productId}/ask`, {
+        token: userB.token, body: { question: 'hijack attempt' }, expectStatus: 404,
+      });
+      status === 404
+        ? pass('userB POST /api/products/:id/ask → 404')
+        : fail('Isolation: userB can ask about userA product', `got ${status}`);
+    } catch (e) { fail('userB POST ask', e.message); }
+
+    // userB POST /api/products/:id/find-retailers → 403 (different pattern from GET)
+    // Documents the 404-vs-403 inconsistency rather than asserting uniformity.
+    try {
+      const { status } = await req('POST', `/api/products/${productId}/find-retailers`, {
+        token: userB.token, body: {}, expectStatus: 403,
+      });
+      status === 403
+        ? pass('userB POST /find-retailers → 403 (as designed)')
+        : fail('Isolation: userB find-retailers wrong status', `got ${status}, expected 403`);
+    } catch (e) { fail('userB POST find-retailers', e.message); }
+
+    // userB PATCH /api/products/:id/notes → 404 (after bug fix)
+    // Pre-fix this would silently return 200. The test is a forcing function.
+    try {
+      const { status } = await req('PATCH', `/api/products/${productId}/notes`, {
+        token: userB.token, body: { notes: 'HIJACKED' }, expectStatus: 404,
+      });
+      status === 404
+        ? pass('userB PATCH notes → 404 (silent-success bug fixed)')
+        : fail('Isolation: userB PATCH notes wrong status', `got ${status}, expected 404 — silent-success bug may be back`);
+    } catch (e) { fail('userB PATCH notes', e.message); }
+
+    // Read-after-write cross-check: userA re-fetches, notes must be unchanged
+    try {
+      const { data, ok } = await req('GET', `/api/products/${productId}`, { token: userA.token });
+      if (ok && data.notes !== 'HIJACKED') {
+        pass('Isolation cross-check: userA notes not corrupted by userB');
+      } else if (ok) {
+        fail('Isolation: userB hijacked userA notes', `notes="${data.notes}"`);
+      }
+    } catch (e) { fail('Isolation cross-check', e.message); }
   }
 
   // ── 6. Boards ──────────────────────────────────────────────────────────────
@@ -469,7 +804,7 @@ async function main() {
 
   // GET /api/boards (empty)
   try {
-    const { data, ok } = await req('GET', '/api/boards', { token });
+    const { data, ok } = await req('GET', '/api/boards', { token: userA.token });
     ok && Array.isArray(data.boards)
       ? pass('GET /api/boards', `${data.boards.length} board(s)`)
       : fail('GET /api/boards', JSON.stringify(data).slice(0, 120));
@@ -478,7 +813,7 @@ async function main() {
   // POST /api/boards
   try {
     const { data, ok, status } = await req('POST', '/api/boards', {
-      token,
+      token: userA.token,
       body: { name: 'Test Board 🧪', emoji: '🧪', description: 'Automated test board' },
       expectStatus: 201,
     });
@@ -491,57 +826,88 @@ async function main() {
   } catch (e) { fail('POST /api/boards', e.message); }
 
   if (boardId) {
-    // GET /api/boards/:id
+    // GET /api/boards/:id — read-after-write for create
     try {
-      const { data, ok } = await req('GET', `/api/boards/${boardId}`, { token });
+      const { data, ok } = await req('GET', `/api/boards/${boardId}`, { token: userA.token });
       ok && data.board?.id === boardId
-        ? pass('GET /api/boards/:id')
+        ? pass('GET /api/boards/:id — read-after-write for create')
         : fail('GET /api/boards/:id', JSON.stringify(data).slice(0, 120));
     } catch (e) { fail('GET /api/boards/:id', e.message); }
 
-    // PATCH /api/boards/:id (rename)
+    // PATCH /api/boards/:id (rename) + read-after-write
+    const NEW_NAME = 'Test Board (renamed)';
     try {
       const { data, ok } = await req('PATCH', `/api/boards/${boardId}`, {
-        token, body: { name: 'Test Board (renamed)' },
+        token: userA.token, body: { name: NEW_NAME },
       });
-      ok ? pass('PATCH /api/boards/:id (rename)') : fail('PATCH board rename', JSON.stringify(data).slice(0, 120));
+      if (!ok) {
+        fail('PATCH board rename', JSON.stringify(data).slice(0, 120));
+      } else {
+        pass('PATCH /api/boards/:id (rename)');
+        const { data: after } = await req('GET', `/api/boards/${boardId}`, { token: userA.token });
+        if (after.board?.name === NEW_NAME) {
+          pass('Read-after-write: board rename persisted');
+        } else {
+          fail('Read-after-write: board name not updated', `got="${after.board?.name}"`);
+        }
+      }
     } catch (e) { fail('PATCH board rename', e.message); }
 
     if (productId) {
       // POST /api/boards/:id/products (returns 200)
       try {
         const { ok, status } = await req('POST', `/api/boards/${boardId}/products`, {
-          token, body: { productId }, expectStatus: 200,
+          token: userA.token, body: { productId }, expectStatus: 200,
         });
         ok ? pass('POST /api/boards/:id/products (add)') : fail('Add product to board', `status=${status}`);
       } catch (e) { fail('Add product to board', e.message); }
 
-      // Verify product appears in board
+      // Verify product appears in board (read-after-write)
       try {
-        const { data, ok } = await req('GET', `/api/boards/${boardId}`, { token });
+        const { data, ok } = await req('GET', `/api/boards/${boardId}`, { token: userA.token });
         const has = data.products?.some(p => p.id === productId);
         ok && has
-          ? pass('Board contains added product ✓')
+          ? pass('Read-after-write: board contains added product')
           : fail('Board product presence', `products=${JSON.stringify(data.products?.map(p => p.id))}`);
       } catch (e) { fail('Board product presence', e.message); }
 
-      // DELETE /api/boards/:id/products/:productId
+      // DELETE /api/boards/:id/products/:productId + read-after-write
       try {
         const { ok, status } = await req('DELETE', `/api/boards/${boardId}/products/${productId}`, {
-          token, expectStatus: 200,
+          token: userA.token, expectStatus: 200,
         });
-        ok ? pass('DELETE /api/boards/:id/products/:productId (remove)') : fail('Remove from board', `status=${status}`);
+        if (!ok) {
+          fail('Remove from board', `status=${status}`);
+        } else {
+          pass('DELETE /api/boards/:id/products/:productId (remove)');
+          const { data: after } = await req('GET', `/api/boards/${boardId}`, { token: userA.token });
+          if (!after.products?.some(p => p.id === productId)) {
+            pass('Read-after-write: product removed from board');
+          } else {
+            fail('Read-after-write: product still in board after remove');
+          }
+        }
       } catch (e) { fail('Remove from board', e.message); }
     } else {
       skip('Board product add/remove', 'no productId');
     }
 
-    // DELETE /api/boards/:id
+    // DELETE /api/boards/:id + read-after-write
     try {
       const { ok, status } = await req('DELETE', `/api/boards/${boardId}`, {
-        token, expectStatus: 200,
+        token: userA.token, expectStatus: 200,
       });
-      ok ? pass('DELETE /api/boards/:id') : fail('DELETE board', `status=${status}`);
+      if (!ok) {
+        fail('DELETE board', `status=${status}`);
+      } else {
+        pass('DELETE /api/boards/:id');
+        const { status: afterStatus } = await req('GET', `/api/boards/${boardId}`, {
+          token: userA.token, expectStatus: 404,
+        });
+        afterStatus === 404
+          ? pass('Read-after-write: deleted board returns 404')
+          : fail('Read-after-write: deleted board still accessible', `status=${afterStatus}`);
+      }
     } catch (e) { fail('DELETE /api/boards/:id', e.message); }
   }
 
@@ -549,14 +915,14 @@ async function main() {
   section('Search');
 
   try {
-    const { data, ok } = await req('GET', '/api/search?q=chair', { token });
+    const { data, ok } = await req('GET', '/api/search?q=chair', { token: userA.token });
     ok
       ? pass('GET /api/search?q=chair', `${data.products?.length ?? 0} product(s)`)
       : fail('GET /api/search', JSON.stringify(data).slice(0, 120));
   } catch (e) { fail('GET /api/search', e.message); }
 
   try {
-    const { data, ok } = await req('GET', '/api/search/categories', { token });
+    const { data, ok } = await req('GET', '/api/search/categories', { token: userA.token });
     ok && Array.isArray(data.categories)
       ? pass('GET /api/search/categories', `${data.categories.length} categor(y/ies)`)
       : fail('GET /api/search/categories', JSON.stringify(data).slice(0, 120));
@@ -566,14 +932,14 @@ async function main() {
   section('Notifications');
 
   try {
-    const { data, ok } = await req('GET', '/api/notifications', { token });
+    const { data, ok } = await req('GET', '/api/notifications', { token: userA.token });
     ok && Array.isArray(data.notifications)
       ? pass('GET /api/notifications', `${data.notifications.length} notification(s)`)
       : fail('GET /api/notifications', JSON.stringify(data).slice(0, 120));
   } catch (e) { fail('GET /api/notifications', e.message); }
 
   try {
-    const { ok } = await req('PATCH', '/api/notifications/read-all', { token, body: {} });
+    const { ok } = await req('PATCH', '/api/notifications/read-all', { token: userA.token, body: {} });
     ok ? pass('PATCH /api/notifications/read-all') : fail('PATCH notifications read-all', 'failed');
   } catch (e) { fail('PATCH notifications read-all', e.message); }
 
@@ -581,7 +947,7 @@ async function main() {
   section('Subscriptions');
 
   try {
-    const { data, ok } = await req('GET', '/api/subscriptions/status', { token });
+    const { data, ok } = await req('GET', '/api/subscriptions/status', { token: userA.token });
     ok
       ? pass('GET /api/subscriptions/status', `status="${data.status ?? data.subscription_status ?? '—'}"`)
       : fail('GET /api/subscriptions/status', JSON.stringify(data).slice(0, 120));
@@ -590,23 +956,20 @@ async function main() {
   // ── 10. Social URL routing (no hard block) ─────────────────────────────────
   section('Social URL handling');
 
-  // Instagram URL — should start import (link pipeline), NOT fail immediately
   const INSTAGRAM_URL = 'https://www.instagram.com/p/C0test123456/';
   try {
     const { data, ok, status } = await req('POST', '/api/imports/link', {
-      token, body: { url: INSTAGRAM_URL }, expectStatus: 202,
+      token: userA.token, body: { url: INSTAGRAM_URL }, expectStatus: 202,
     });
-    // 202 = accepted for processing. Even if AI later can't extract, it shouldn't hard-block here.
     ok && data.importId
       ? pass('Instagram URL accepted (202) — not blocked at routing', `importId=${data.importId.slice(0, 8)}…`)
       : fail('Instagram URL routing', `status=${status}, body=${JSON.stringify(data).slice(0, 120)}`);
   } catch (e) { fail('Instagram URL routing', e.message); }
 
-  // Pinterest URL — same expectation
   const PINTEREST_URL = 'https://www.pinterest.co.uk/pin/123456789012345678/';
   try {
     const { data, ok, status } = await req('POST', '/api/imports/link', {
-      token, body: { url: PINTEREST_URL }, expectStatus: 202,
+      token: userA.token, body: { url: PINTEREST_URL }, expectStatus: 202,
     });
     ok && data.importId
       ? pass('Pinterest URL accepted (202) — not blocked at routing')
@@ -618,28 +981,68 @@ async function main() {
 
   if (productId) {
     try {
-      const { ok } = await req('DELETE', `/api/products/${productId}`, { token, expectStatus: 200 });
-      ok ? pass('DELETE /api/products/:id (test product removed)') : fail('Cleanup: delete product', 'failed');
+      const { ok } = await req('DELETE', `/api/products/${productId}`, { token: userA.token, expectStatus: 200 });
+      if (!ok) {
+        fail('Cleanup: delete product', 'failed');
+      } else {
+        pass('DELETE /api/products/:id (test product removed)');
+        // Read-after-write: GET should now 404
+        const { status } = await req('GET', `/api/products/${productId}`, {
+          token: userA.token, expectStatus: 404,
+        });
+        status === 404
+          ? pass('Read-after-write: deleted product returns 404')
+          : fail('Read-after-write: deleted product still accessible', `status=${status}`);
+      }
     } catch (e) { fail('Cleanup: delete product', e.message); }
   } else {
     skip('Delete test product', 'no productId');
   }
+}
 
-  // ── Summary ────────────────────────────────────────────────────────────────
-  printSummary();
-
-  // Write log file
+// ─────────────────────────────────────────────────────────────────────────────
+// Run wrapper — try/finally guarantees cleanup and summary output even on
+// unhandled errors.
+// ─────────────────────────────────────────────────────────────────────────────
+async function run() {
   try {
-    if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR, { recursive: true });
-    fs.writeFileSync(LOG_FILE, logLines.join('\n') + '\n');
-    emit(`\n${c.dim}  Log saved → ${LOG_FILE}${c.reset}`);
-  } catch { /* not fatal */ }
+    await main();
+  } catch (err) {
+    emit(`\n${c.red}${c.bold}  Test runner error: ${err.message}${c.reset}`);
+    emit(`${c.dim}${err.stack}${c.reset}`);
+    results.push({
+      status: 'fail',
+      name: 'Test runner crash',
+      reason: err.message,
+      section: 'General',
+      severity: 'critical',
+    });
+    failed++;
+  } finally {
+    // Post-run cleanup — purge this run's test users. Non-fatal.
+    emit(`\n${c.dim}Post-run cleanup…${c.reset}`);
+    try {
+      await cleanupTestUsers(0, 'post-run');
+    } catch (e) {
+      emit(`  ${c.yellow}Post-run cleanup warning: ${e.message}${c.reset}`);
+    }
 
-  if (JSON_MODE) {
-    process.stdout.write('\n' + JSON.stringify({ passed, failed, skipped, results }, null, 2) + '\n');
+    printSummary();
+    printPMSummary();
+
+    // Write log file
+    try {
+      if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR, { recursive: true });
+      fs.writeFileSync(LOG_FILE, logLines.join('\n') + '\n');
+      emit(`\n${c.dim}  Log saved → ${LOG_FILE}${c.reset}`);
+    } catch { /* not fatal */ }
+
+    if (JSON_MODE) {
+      process.stdout.write('\n' + JSON.stringify({ passed, failed, skipped, results }, null, 2) + '\n');
+    }
+
+    process.exit(failed > 0 ? 1 : 0);
   }
-
-  process.exit(failed > 0 ? 1 : 0);
 }
 
 function printSummary() {
@@ -659,8 +1062,8 @@ function printSummary() {
   const failures = results.filter(r => r.status === 'fail');
   if (failures.length > 0) {
     emit(`\n${c.red}${c.bold}  Failed tests:${c.reset}`);
-    failures.forEach(({ name, reason }) => {
-      emit(`  ${c.red}✗${c.reset} ${name}`);
+    failures.forEach(({ name, reason, section }) => {
+      emit(`  ${c.red}✗${c.reset} [${section}] ${name}`);
       if (reason) emit(`    ${c.dim}${reason}${c.reset}`);
     });
   } else {
@@ -668,8 +1071,89 @@ function printSummary() {
   }
 }
 
-main().catch(err => {
-  console.error(`\n${C.red}Test runner crashed: ${err.message}${C.reset}`);
+// ─────────────────────────────────────────────────────────────────────────────
+// PM Summary — plain-language status block for non-technical readers.
+// Bracketed by stable markers so the scheduled task can grep it reliably.
+// ─────────────────────────────────────────────────────────────────────────────
+function printPMSummary() {
+  const total = passed + failed + skipped;
+  const failures = results.filter(r => r.status === 'fail');
+  const failedSections = new Set(failures.map(f => f.section));
+  const skipCount = results.filter(r => r.status === 'skip').length;
+
+  // Plain-language phrases keyed by section. Ordered worst-first.
+  const SECTION_MESSAGES = {
+    'Two-user isolation':      { sev: 'critical',  msg: '🚨 URGENT: Users can see or modify each other\'s private products. This is a privacy bug — do not deploy.' },
+    'Auth':                    { sev: 'critical',  msg: '🚨 Login and sign-up are down. No one can get into Stash right now.' },
+    'Health':                  { sev: 'critical',  msg: '🚨 The backend itself is unreachable or unhealthy.' },
+    'Import — link':           { sev: 'degraded',  msg: '⚠️ Saving products from links is broken. Users who share a link with Stash will see an error.' },
+    'Fixtures — alt paths':    { sev: 'degraded',  msg: '⚠️ Some product pages (with unusual formatting) aren\'t being parsed correctly during import.' },
+    'Products — post-import':  { sev: 'degraded',  msg: '⚠️ Something\'s wrong with saved products — viewing details, notes, the AI "Ask" feature, or price tracking may be broken.' },
+    'Boards':                  { sev: 'degraded',  msg: '⚠️ Boards are broken — users can\'t organize their saved items.' },
+    'Search':                  { sev: 'degraded',  msg: '⚠️ Search isn\'t returning results properly.' },
+    'Products — empty state':  { sev: 'degraded',  msg: '⚠️ Fresh accounts aren\'t showing the right initial state.' },
+    'Subscriptions':           { sev: 'minor',     msg: 'Minor: subscription status checks aren\'t working — may affect billing info display.' },
+    'Notifications':           { sev: 'minor',     msg: 'Minor: notifications aren\'t updating properly.' },
+    'Social URL handling':     { sev: 'minor',     msg: 'Minor: Instagram/Pinterest link handling has a routing issue.' },
+    'Cleanup':                 { sev: 'minor',     msg: 'Minor: test cleanup had a hiccup (internal — not user-facing).' },
+    'General':                 { sev: 'critical',  msg: '🚨 The test runner itself crashed unexpectedly.' },
+  };
+
+  emit('');
+  emit('===== PM SUMMARY START =====');
+
+  if (failed === 0) {
+    emit(`✅ All ${total} checks passing. Stash is working correctly.`);
+    emit(`   Tests run: ${total}  •  Passed: ${passed}${skipped > 0 ? `  •  Skipped: ${skipped}` : ''}`);
+    emit('===== PM SUMMARY END =====');
+    return;
+  }
+
+  // Group failures by severity
+  const bySeverity = { critical: [], degraded: [], minor: [] };
+  for (const sectionName of failedSections) {
+    const entry = SECTION_MESSAGES[sectionName] || { sev: 'degraded', msg: `⚠️ Something is broken in the "${sectionName}" area.` };
+    const count = failures.filter(f => f.section === sectionName).length;
+    bySeverity[entry.sev].push({ section: sectionName, msg: entry.msg, count });
+  }
+
+  // Headline: lead with worst severity
+  let headline;
+  if (bySeverity.critical.length > 0) {
+    headline = `🚨 ${failed} check${failed > 1 ? 's' : ''} failing. Critical issue${bySeverity.critical.length > 1 ? 's' : ''} detected — needs urgent attention.`;
+  } else if (bySeverity.degraded.length > 0) {
+    headline = `⚠️ ${failed} check${failed > 1 ? 's' : ''} failing. Stash is degraded but still running.`;
+  } else {
+    headline = `${failed} minor check${failed > 1 ? 's' : ''} failing. Non-urgent issue${failed > 1 ? 's' : ''} detected.`;
+  }
+  emit(headline);
+  emit('');
+
+  // Bullet points, critical first
+  const severityOrder = ['critical', 'degraded', 'minor'];
+  for (const sev of severityOrder) {
+    for (const item of bySeverity[sev]) {
+      emit(`• ${item.msg}`);
+    }
+  }
+
+  // Skip-cascade note
+  const skipsFromCrash = results.filter(r => r.status === 'skip');
+  if (skipsFromCrash.length >= 3) {
+    emit('');
+    emit(`  (${skipsFromCrash.length} downstream checks couldn't run because of upstream failures above.)`);
+  }
+
+  // Claude action line
+  emit('');
+  emit('Claude is investigating the root cause and will propose a fix when you\'re next online.');
+  emit(`   Technical log: ${LOG_FILE}`);
+
+  emit('===== PM SUMMARY END =====');
+}
+
+run().catch(err => {
+  console.error(`\n${C.red}Test runner crashed hard: ${err.message}${C.reset}`);
   console.error(err.stack);
   process.exit(1);
 });

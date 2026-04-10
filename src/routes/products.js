@@ -252,10 +252,11 @@ router.get('/:id', authenticate, async (req, res) => {
 router.patch('/:id/notes', authenticate, async (req, res) => {
   const { notes } = req.body;
   try {
-    await query(
+    const result = await query(
       'UPDATE user_products SET notes = $1 WHERE product_id = $2 AND user_id = $3',
       [notes, req.params.id, req.user.id]
     );
+    if (result.rowCount === 0) return res.status(404).json({ error: 'Product not found' });
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: 'Failed to update notes' });
@@ -269,10 +270,11 @@ router.patch('/:id/reading-progress', authenticate, async (req, res) => {
     return res.status(400).json({ error: 'current_page must be a non-negative integer' });
   }
   try {
-    await query(
+    const result = await query(
       'UPDATE user_products SET current_page = $1 WHERE product_id = $2 AND user_id = $3',
       [current_page, req.params.id, req.user.id]
     );
+    if (result.rowCount === 0) return res.status(404).json({ error: 'Product not found' });
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: 'Failed to update reading progress' });
@@ -286,10 +288,11 @@ router.patch('/:id/checked-ingredients', authenticate, async (req, res) => {
     return res.status(400).json({ error: 'checked_ingredients must be an array of booleans' });
   }
   try {
-    await query(
+    const result = await query(
       'UPDATE user_products SET checked_ingredients = $1 WHERE product_id = $2 AND user_id = $3',
       [JSON.stringify(checked_ingredients), req.params.id, req.user.id]
     );
+    if (result.rowCount === 0) return res.status(404).json({ error: 'Product not found' });
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: 'Failed to update checked ingredients' });
@@ -303,13 +306,14 @@ router.patch('/:id/clothing-preference', authenticate, async (req, res) => {
     return res.status(400).json({ error: 'Provide at least one of size_preference or colour_preference' });
   }
   try {
-    await query(
+    const result = await query(
       `UPDATE user_products
        SET size_preference   = COALESCE($1, size_preference),
            colour_preference = COALESCE($2, colour_preference)
        WHERE product_id = $3 AND user_id = $4`,
       [size_preference ?? null, colour_preference ?? null, req.params.id, req.user.id]
     );
+    if (result.rowCount === 0) return res.status(404).json({ error: 'Product not found' });
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: 'Failed to update clothing preference' });

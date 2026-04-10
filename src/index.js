@@ -1,4 +1,5 @@
 require('dotenv').config({ override: true });
+const path = require('path');
 const express = require('express');
 const helmet = require('helmet');
 const cors = require('cors');
@@ -44,6 +45,19 @@ app.use('/api/subscriptions/webhook', express.raw({ type: 'application/json' }))
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(compression());
+
+// Test fixtures — static HTML pages used by the nightly test suite.
+// Mounted BEFORE the rate limiter so fixture fetches during a test run
+// aren't throttled. Serves from backend/public/test-fixtures/.
+// No caching so fixture edits take effect immediately during development.
+app.use(
+  '/test-fixtures',
+  express.static(path.join(__dirname, '../public/test-fixtures'), {
+    maxAge: 0,
+    etag: false,
+    setHeaders: (res) => res.setHeader('Cache-Control', 'no-store'),
+  })
+);
 
 // Rate limiting
 const limiter = rateLimit({
@@ -96,6 +110,71 @@ app.post('/admin/migrate-images', async (req, res) => {
     }
     console.log(`[MIGRATE] === Complete === updated:${updated} skipped:${skipped} errors:${errors}`);
   })().catch(err => console.log(`[MIGRATE] Fatal: ${err.message}`));
+});
+
+// Test-user cleanup — purges accounts matching stash_test_%@test.internal.
+// Used by the nightly test suite to clean up crashed prior runs AND its own
+// test users when the run completes. Protected by ADMIN_SECRET.
+//
+// Defense in depth: the email pattern is hard-coded in the SQL string (not
+// parameterized), so even with a leaked secret this endpoint structurally
+// cannot touch real user accounts.
+//
+// Deleting a user cascades user_products, boards, board_items, notifications,
+// and import_queue rows per the schema. Global products rows are left intact
+// (they're deduped by canonical_id and reused across runs).
+app.post('/admin/cleanup-test-users', async (req, res) => {
+  const secret = process.env.ADMIN_SECRET;
+  if (!secret || req.headers['x-admin-secret'] !== secret) {
+    logger.warn('cleanup-test-users denied', {
+      ip: req.ip,
+      ua: req.headers['user-agent'],
+    });
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  const olderThanMinutes = Math.max(0, Number(req.body?.olderThanMinutes ?? 0));
+  const dryRun = req.body?.dryRun === true;
+  const { query } = require('./database/db');
+
+  try {
+    // Pattern is HARD-CODED in SQL, not parameterized — defense in depth.
+    const { rows } = await query(
+      `SELECT id, email FROM users
+         WHERE email LIKE 'stash_test_%@test.internal'
+           AND created_at < NOW() - ($1 || ' minutes')::interval`,
+      [olderThanMinutes]
+    );
+
+    logger.info('cleanup-test-users', {
+      olderThanMinutes,
+      dryRun,
+      count: rows.length,
+      ip: req.ip,
+      emails: rows.map(r => r.email),
+    });
+
+    if (dryRun) {
+      return res.json({
+        dryRun: true,
+        count: rows.length,
+        wouldDelete: rows,
+      });
+    }
+
+    if (rows.length > 0) {
+      await query('DELETE FROM users WHERE id = ANY($1::uuid[])', [rows.map(r => r.id)]);
+    }
+
+    return res.json({
+      dryRun: false,
+      deleted: rows.length,
+      emails: rows.map(r => r.email),
+    });
+  } catch (err) {
+    logger.error('cleanup-test-users error', { error: err.message, stack: err.stack });
+    return res.status(500).json({ error: 'Cleanup failed' });
+  }
 });
 
 // API routes
