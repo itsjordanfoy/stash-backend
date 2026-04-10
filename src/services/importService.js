@@ -549,23 +549,38 @@ async function processImport(importId, { userId, sourceType, sourceUrl, screensh
       const pageResult = await scraperService.fetchPage(sourceUrl);
       const ogData = await scraperService.extractOpenGraph(sourceUrl, pageResult?.html || null);
 
+      // htmlData includes JSON-LD Product schema extraction inside parseProductPage
       const htmlData = pageResult
         ? scraperService.parseProductPage(pageResult.html, sourceUrl)
         : null;
 
-      // Merge OG + HTML data
-      const rawPageData = {
-        ...(htmlData || {}),
-        ...(ogData
-          ? {
-              name: ogData.title || htmlData?.name,
-              image_url: ogData.image || htmlData?.image_url,
-              description: ogData.description || htmlData?.description,
-              retailer_name: ogData.site_name,
-              price: ogData.price || htmlData?.price,
-            }
-          : {}),
-      };
+      // Highest-trust source: Shopify's canonical product JSON. Runs for any
+      // URL matching /products/{slug} — returns null quickly if not Shopify.
+      // When present, this data is preferred over ALL other sources because
+      // it comes straight from the store's CMS.
+      const shopifyData = await scraperService.fetchShopifyProduct(sourceUrl).catch(() => null);
+
+      // Merge in priority order: Shopify JSON > JSON-LD (in htmlData) > OG > HTML heuristics
+      // Each later fallback only fills gaps left by the higher-priority source.
+      const rawPageData = {};
+      const fields = ['name', 'brand', 'description', 'price', 'currency', 'image_url', 'images', 'retailer_name'];
+      const sources = [shopifyData, htmlData, ogData].filter(Boolean);
+      for (const field of fields) {
+        for (const source of sources) {
+          const v = source[field];
+          if (v != null && v !== '' && !(Array.isArray(v) && v.length === 0)) {
+            if (rawPageData[field] == null) rawPageData[field] = v;
+          }
+        }
+      }
+      // OG-specific mapping: its "title" and "site_name" fields map to name/retailer_name
+      if (!rawPageData.name && ogData?.title) rawPageData.name = ogData.title;
+      if (!rawPageData.image_url && ogData?.image) rawPageData.image_url = ogData.image;
+      if (!rawPageData.description && ogData?.description) rawPageData.description = ogData.description;
+      if (!rawPageData.retailer_name && ogData?.site_name) rawPageData.retailer_name = ogData.site_name;
+      if (!rawPageData.price && ogData?.price) rawPageData.price = ogData.price;
+      // Preserve reviews from htmlData (JSON-LD parser embeds them)
+      if (htmlData?.reviews) rawPageData.reviews = htmlData.reviews;
 
       // Use AI to extract and enrich (with URL-based category hint if detectable)
       const urlCategory = classifyUrlCategory(sourceUrl);
@@ -576,7 +591,15 @@ async function processImport(importId, { userId, sourceType, sourceUrl, screensh
         urlCategory
       );
 
-      // Merge AI result with scraped data
+      // ── Merge AI result with scraped data ──────────────────────────────
+      // Priority for product-identifying fields (name, description, price,
+      // image, brand): STRUCTURED SCRAPED DATA WINS. JSON-LD Product schema
+      // and OpenGraph are explicitly authored by the site to describe the
+      // product — they're higher-trust than anything the AI can infer.
+      // The AI only fills gaps where scraping found nothing AND contributes
+      // enrichment fields (item_type, category, genre, specs, etc.) that
+      // structured data usually doesn't contain.
+      //
       // Reviews: prefer AI-extracted (richer text), fall back to JSON-LD scraped
       const mergedReviews = (() => {
         const aiRevs = Array.isArray(extractedData.reviews) ? extractedData.reviews : [];
@@ -585,17 +608,27 @@ async function processImport(importId, { userId, sourceType, sourceUrl, screensh
         return combined.slice(0, 5);
       })();
 
+      // Build the merged object by starting from the AI result (which provides
+      // enrichment fields), then selectively overriding the identifying fields
+      // with the scraped values when they exist.
+      const scraped = rawPageData || {};
       extractedData = {
-        ...rawPageData,
         ...extractedData,
-        price: extractedData.price || rawPageData.price,
-        image_url: extractedData.image_url || rawPageData.image_url,
+        // Identifying fields — scraped wins when non-empty
+        name: scraped.name || extractedData.name,
+        description: scraped.description || extractedData.description,
+        brand: scraped.brand || extractedData.brand,
+        price: (scraped.price != null && scraped.price > 0) ? scraped.price : extractedData.price,
+        currency: scraped.currency || extractedData.currency,
+        image_url: scraped.image_url || extractedData.image_url,
+        retailer_name: scraped.retailer_name || extractedData.retailer_name,
+        // Gallery — union of both sources
         images: [
           ...new Set([
+            ...(Array.isArray(scraped.images) ? scraped.images : []),
             ...(Array.isArray(extractedData.images) ? extractedData.images : []),
-            ...(Array.isArray(rawPageData.images) ? rawPageData.images : []),
+            ...(scraped.image_url ? [scraped.image_url] : []),
             ...(extractedData.image_url ? [extractedData.image_url] : []),
-            ...(rawPageData.image_url ? [rawPageData.image_url] : []),
           ])
         ].filter(Boolean).slice(0, 8),
         reviews: mergedReviews.length > 0 ? mergedReviews : null,
@@ -669,37 +702,41 @@ async function processImport(importId, { userId, sourceType, sourceUrl, screensh
         }
       }
 
-      // Book-specific image fallback — Open Library's cover API is free,
-      // has no auth, and covers tens of millions of books by ISBN.
-      // Only used when we still don't have an image AND we have an ISBN.
-      if (!extractedData.image_url && extractedData.isbn) {
-        const cleanIsbn = String(extractedData.isbn).replace(/[^\dX]/gi, '');
-        if (cleanIsbn.length === 10 || cleanIsbn.length === 13) {
-          const coverUrl = `https://covers.openlibrary.org/b/isbn/${cleanIsbn}-L.jpg`;
-          logger.info('Trying Open Library cover by ISBN', { isbn: cleanIsbn, coverUrl });
-          try {
-            const axios = require('axios');
-            // default=false so we get 404 if there's no cover rather than a blank placeholder
-            const probe = await axios.get(`${coverUrl}?default=false`, {
-              timeout: 6000,
-              validateStatus: () => true,
-              maxContentLength: 20 * 1024 * 1024,
-              responseType: 'arraybuffer',
-            });
-            if (probe.status === 200 && probe.data.length > 1000) {
-              extractedData.image_url = coverUrl;
-              extractedData.images = [coverUrl, ...(extractedData.images || [])].filter(Boolean);
-              logger.info('Open Library cover found', { isbn: cleanIsbn });
-            }
-          } catch (err) {
-            logger.debug('Open Library cover fetch failed', { error: err.message });
+    }
+
+    // ── Open Library book cover fallback ─────────────────────────────────
+    // Runs for ALL import types (link, screenshot, social) when the item
+    // has an ISBN but no image. The cover API is free, no auth, and covers
+    // tens of millions of books. Screenshots of book pages often extract an
+    // ISBN from vision but no image — this closes that gap.
+    if (extractedData && !extractedData.image_url && extractedData.isbn) {
+      const cleanIsbn = String(extractedData.isbn).replace(/[^\dX]/gi, '');
+      if (cleanIsbn.length === 10 || cleanIsbn.length === 13) {
+        const coverUrl = `https://covers.openlibrary.org/b/isbn/${cleanIsbn}-L.jpg`;
+        logger.info('Trying Open Library cover by ISBN', { isbn: cleanIsbn });
+        try {
+          const axios = require('axios');
+          const probe = await axios.get(`${coverUrl}?default=false`, {
+            timeout: 6000,
+            validateStatus: () => true,
+            maxContentLength: 20 * 1024 * 1024,
+            responseType: 'arraybuffer',
+          });
+          if (probe.status === 200 && probe.data.length > 1000) {
+            extractedData.image_url = coverUrl;
+            extractedData.images = [coverUrl, ...(extractedData.images || [])].filter(Boolean);
+            logger.info('Open Library cover found', { isbn: cleanIsbn });
           }
+        } catch (err) {
+          logger.debug('Open Library cover fetch failed', { error: err.message });
         }
       }
     }
 
-    // Ensure every item has a description — generate one from metadata if extraction missed it
-    if (!extractedData.description && extractedData.name) {
+    // Ensure every item has a description — generate one from metadata ONLY
+    // if extraction produced no real description. This is the crucial order:
+    // real scraped description > AI-written description.
+    if (extractedData && !extractedData.description && extractedData.name) {
       extractedData.description = await aiService.generateDescription(extractedData).catch(() => null);
     }
 

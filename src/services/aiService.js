@@ -879,14 +879,16 @@ async function findRetailersForProduct(product) {
       'Nintendo Store':  'https://store.nintendo.co.uk/en/search?q={Q}',
     },
     US: {
+      // Curl-verified US templates (200/403/429 all valid; 403/429 = bot
+      // blocked but real users in browsers get through).
+      // Retailers that returned 000 (TCP-level block) are excluded because
+      // we cannot verify the URL format is correct.
       'Amazon':          'https://www.amazon.com/s?k={Q}',
-      'Barnes & Noble':  'https://www.barnesandnoble.com/s/{Q}',
       'Books-A-Million': 'https://www.booksamillion.com/search?query={Q}',
       'Bookshop.org':    'https://bookshop.org/search?keywords={Q}',
       'AbeBooks':        'https://www.abebooks.com/servlet/SearchResults?kn={Q}',
       'Target':          'https://www.target.com/s?searchTerm={Q}',
       'Walmart':         'https://www.walmart.com/search?q={Q}',
-      'Best Buy':        'https://www.bestbuy.com/site/searchpage.jsp?st={Q}',
       'Costco':          'https://www.costco.com/CatalogSearch?keyword={Q}',
       'eBay':            'https://www.ebay.com/sch/i.html?_nkw={Q}',
       'Etsy':            'https://www.etsy.com/search?q={Q}',
@@ -899,12 +901,12 @@ async function findRetailersForProduct(product) {
       'Crate & Barrel':  'https://www.crateandbarrel.com/search?query={Q}',
       'West Elm':        'https://www.westelm.com/search/results.html?words={Q}',
       'IKEA':            'https://www.ikea.com/us/en/search/?q={Q}',
+      'Home Depot':      'https://www.homedepot.com/s/{Q}',
+      "Lowe's":          'https://www.lowes.com/search?searchTerm={Q}',
       'Sephora':         'https://www.sephora.com/search?keyword={Q}',
       'Ulta':            'https://www.ulta.com/search?Ntt={Q}',
-      'REI':             'https://www.rei.com/search?q={Q}',
       "Dick's Sporting Goods": 'https://www.dickssportinggoods.com/search/SearchDisplay?searchTerm={Q}',
       'Whole Foods':     'https://www.wholefoodsmarket.com/search?text={Q}',
-      'Kroger':          'https://www.kroger.com/search?query={Q}',
       'GameStop':        'https://www.gamestop.com/search?q={Q}',
       'Steam':           'https://store.steampowered.com/search/?term={Q}',
       'Discogs':         'https://www.discogs.com/search/?q={Q}',

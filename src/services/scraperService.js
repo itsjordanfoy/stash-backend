@@ -571,6 +571,75 @@ async function fetchOGImage(url) {
 }
 
 /**
+ * Fetch comprehensive product data from a Shopify store's public JSON API.
+ * Any Shopify product URL `/products/{slug}` can be appended with `.json`
+ * to return the canonical product record: title, body_html, vendor, price,
+ * all variant prices, and the full image gallery. This is the single
+ * highest-signal source for Shopify-based stores.
+ *
+ * Returns null if the URL isn't Shopify or the fetch fails — the caller
+ * can fall back to HTML scraping / AI extraction.
+ */
+async function fetchShopifyProduct(url) {
+  // Only attempt on URLs that look like Shopify product pages
+  if (!/\/products\/[^/?#]+/.test(url)) return null;
+
+  const jsonUrl = url.replace(/\?.*$/, '').replace(/\/$/, '') + '.json';
+  const headers = { ...browserHeaders(USER_AGENTS[0]), Accept: 'application/json' };
+
+  try {
+    const r = await axios.get(jsonUrl, {
+      headers, timeout: TIMEOUT_MS, validateStatus: s => s < 500,
+    });
+    if (r.status !== 200 || !r.data?.product) return null;
+
+    const p = r.data.product;
+    // Strip HTML tags from body_html for a clean description
+    const description = p.body_html
+      ? String(p.body_html)
+          .replace(/<[^>]*>/g, ' ')
+          .replace(/&nbsp;/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .slice(0, 400)
+      : null;
+
+    const variants = Array.isArray(p.variants) ? p.variants : [];
+    // Prefer the lowest non-zero variant price
+    const prices = variants
+      .map(v => parseFloat(v.price))
+      .filter(x => Number.isFinite(x) && x > 0);
+    const price = prices.length > 0 ? Math.min(...prices) : null;
+
+    const images = (Array.isArray(p.images) ? p.images : [])
+      .map(img => typeof img === 'string' ? img : img?.src)
+      .filter(Boolean)
+      .map(u => u.replace(/^http:\/\//i, 'https://'));
+
+    logger.info('Shopify product JSON fetched', {
+      url: jsonUrl, name: p.title, price, imageCount: images.length,
+    });
+
+    return {
+      name: p.title || null,
+      brand: p.vendor || null,
+      description,
+      price,
+      // Shopify doesn't expose currency on the product object directly — it's
+      // per-shop. Detect from the source URL's TLD as a reasonable default.
+      currency: /\.co\.uk/i.test(url) ? 'GBP' : 'USD',
+      image_url: images[0] || null,
+      images,
+      tags: Array.isArray(p.tags) ? p.tags : (typeof p.tags === 'string' ? p.tags.split(',').map(t => t.trim()) : []),
+      product_type: p.product_type || null,
+    };
+  } catch (err) {
+    logger.debug('Shopify product JSON fetch failed', { url: jsonUrl, error: err.message });
+    return null;
+  }
+}
+
+/**
  * Try to fetch extra images from platform-specific JSON APIs.
  * Returns an array of absolute image URL strings, or [] if not applicable.
  *
@@ -694,6 +763,7 @@ module.exports = {
   fetchOGImage,
   extractImages,
   fetchPlatformImages,
+  fetchShopifyProduct,
   detectSourceType,
   scrapeRetailerPrice,
   isSameProduct,
