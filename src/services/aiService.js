@@ -283,44 +283,41 @@ ${context}`,
 async function inferFromUrl(url) {
   const message = await withRetry(() => client.messages.create({
     model: MODEL,
-    // Schema is smaller here but bumping for safety to avoid the same
-    // truncation class of failure on rare obscure URLs with rich descriptions.
     max_tokens: 2048,
 
-    system: `You are a URL-recognition specialist. You identify web pages from their URL alone using your extensive world knowledge of how major sites structure their URLs. You do NOT have the HTML — just the URL. Your job is to make an informed guess about what the page is, so the user can save it to their library.`,
+    system: `You are a URL-recognition specialist. You identify web pages from their URL alone using your extensive world knowledge of how major sites structure their URLs. You do NOT have the HTML — just the URL. Honesty over confidence: if a URL is truly opaque (e.g. an Amazon ASIN you don't recognise), say so by setting confidence to 0 — DO NOT guess a famous product.`,
     messages: [
       {
         role: 'user',
-        content: `I need to identify what this page is about from its URL alone. No scraping was possible (the site blocks bots or renders content in JavaScript).
+        content: `Identify what this page is about from its URL alone. No scraping was possible (bot block or JS-rendered).
 
 URL: ${url}
 
-Use your knowledge of this domain and URL structure. Known patterns include:
-- amazon.com/dp/ASIN — specific Amazon products (you know many ASINs)
-- imdb.com/title/tt_ID — films and TV shows (you know the famous ones)
-- ikea.com/.../product-name-numeric_id — the URL slug contains the product name
-- goodreads.com/book/show/ID.Book_Title — the slug contains the title
-- bbcgoodfood.com/recipes/slug — the slug is the recipe name
-- Many news/blog URLs contain the article title in the slug
+Recognise these patterns:
+- amazon.*/dp/ASIN — ONLY identify if you 100% recognise that exact ASIN. Most ASINs are opaque and unrecognisable. If you do NOT recognise the ASIN, set name to null and confidence to 0 — do NOT default to famous products like "Fire TV Stick" or "Echo Dot".
+- imdb.com/title/tt_ID — film/TV. Same rule: only identify if you genuinely recognise that exact tt ID.
+- Slug-based URLs (ikea.com/.../kallax-shelving-unit, bbcgoodfood.com/recipes/best-spaghetti-bolognese-recipe, goodreads.com/book/show/ID.Animal_Farm) — extract the product/title from the slug. These are reliable.
+- Domain root URLs (bbc.com/news, dezeen.com, stratechery.com) — use your knowledge of what the site is.
 
-Extract whatever you can reasonably infer from the URL slug, path, and domain knowledge. Return a JSON object in this exact shape:
+Return a JSON object in this exact shape:
 
 {
-  "name": "SHORT name — max 50 chars. Infer from URL slug if nothing else. For Amazon ASINs, use the product name you remember. For IMDb, use the film title. Never include the site name.",
+  "name": "SHORT name — max 50 chars. NULL if you can't reliably tell what the page is about. Never default to a famous product.",
   "item_type": "product" | "place" | "entertainment" | "event" | "general" | "course" | "podcast" | "youtube_video" | "video_game" | "wine" | "article" | "app",
   "brand": "brand or publisher (else null)",
-  "description": "brief description — what you know about this page (max 200 chars)",
+  "description": "brief description — what you know about this page (max 200 chars). Null if uncertain.",
   "category": "best-guess category",
   "retailer_name": "domain-friendly site name (e.g. 'Amazon', 'IMDb', 'IKEA')",
   "confidence": 0.0-1.0
 }
 
-IMPORTANT:
-- Be CONFIDENT. If the URL slug clearly spells out the item (e.g. "best-spaghetti-bolognese-recipe"), set confidence to 0.6+.
-- For well-known sites where you recognise the URL pattern, set confidence to 0.7+.
-- Only use confidence below 0.3 if the URL is truly opaque (random IDs, hash fragments).
-- ALWAYS return a name — use the best inference from the URL slug. Never return null for name.
-- Return ONLY the JSON object, no markdown.`,
+CONFIDENCE RULES:
+- 0.85+: You 100% recognise the URL (famous IMDb tt0111161, slug clearly spells out the item)
+- 0.5–0.7: Slug strongly hints at the product but you can't fully confirm
+- 0.0–0.2: URL is opaque (unrecognised ASIN, random ID, hash fragment) — return null name
+- NEVER fabricate a famous product name (Echo Dot, Fire TV Stick, AirPods, etc.) just to fill the field. It's better to return null than to mis-identify.
+
+Return ONLY the JSON object, no markdown.`,
       },
     ],
   }));
@@ -328,13 +325,22 @@ IMPORTANT:
   const text = message.content.find(b => b.type === 'text')?.text || '{}';
   try {
     const parsed = parseJSON(text);
-    // Safety net — if the AI bailed with null/empty name, fall back to the URL slug itself
+    // Safety net — if the AI bailed with null/empty name, try the URL slug.
+    // BUT skip the slug fallback when the last segment looks like an opaque
+    // ID (Amazon ASIN, IMDb tt ID, hex hash, etc.) — those produce garbage.
     if (!parsed.name) {
       try {
         const u = new URL(url);
         const lastSegment = u.pathname.split('/').filter(Boolean).pop() || u.hostname;
-        parsed.name = lastSegment.replace(/[-_]/g, ' ').replace(/\.(html?|php)$/i, '').slice(0, 50);
-        parsed.confidence = Math.max(parsed.confidence || 0, 0.3);
+        const looksLikeOpaqueId =
+          /^B0[A-Z0-9]{8}$/i.test(lastSegment) ||      // Amazon ASIN
+          /^tt\d{6,9}$/i.test(lastSegment) ||           // IMDb title ID
+          /^[a-f0-9]{12,}$/i.test(lastSegment) ||       // hex hash
+          /^\d{6,}$/.test(lastSegment);                 // numeric ID
+        if (!looksLikeOpaqueId) {
+          parsed.name = lastSegment.replace(/[-_]/g, ' ').replace(/\.(html?|php)$/i, '').slice(0, 50);
+          parsed.confidence = Math.max(parsed.confidence || 0, 0.3);
+        }
       } catch { /* ignore */ }
     }
     return parsed;

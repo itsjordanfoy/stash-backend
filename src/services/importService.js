@@ -915,6 +915,61 @@ async function confirmImport(importId, userId, confirmedData) {
   return productId;
 }
 
+// Normalise retailer names so the same retailer doesn't appear under
+// multiple variants (e.g. "Amazon", "Amazon.co.uk", "Amazon UK"). Without
+// this, the discovery flow inserts duplicates because the source page's
+// OpenGraph site_name and the hardcoded scraper output disagree.
+const RETAILER_NAME_ALIASES = {
+  // Amazon
+  'amazon': 'Amazon UK',
+  'amazon uk': 'Amazon UK',
+  'amazon.co.uk': 'Amazon UK',
+  'amazon.com': 'Amazon UK',
+  'amazon.de': 'Amazon UK',
+  // Apple
+  'apple': 'Apple',
+  'apple store': 'Apple',
+  'apple.com': 'Apple',
+  // John Lewis
+  'john lewis': 'John Lewis',
+  'john lewis & partners': 'John Lewis',
+  'johnlewis.com': 'John Lewis',
+  // Argos
+  'argos': 'Argos',
+  'argos.co.uk': 'Argos',
+  // eBay
+  'ebay': 'eBay UK',
+  'ebay uk': 'eBay UK',
+  'ebay.co.uk': 'eBay UK',
+  // IKEA
+  'ikea': 'IKEA',
+  'ikea.com': 'IKEA',
+  'ikea uk': 'IKEA',
+  // Currys
+  'currys': 'Currys',
+  'currys.co.uk': 'Currys',
+  // ASOS
+  'asos': 'ASOS',
+  'asos.com': 'ASOS',
+  // Waterstones
+  'waterstones': 'Waterstones',
+  'waterstones.com': 'Waterstones',
+  // Google Shopping
+  'google shopping': 'Google Shopping',
+  'google': 'Google Shopping',
+};
+function normalizeRetailerName(rawName) {
+  if (!rawName) return null;
+  const cleaned = String(rawName).trim();
+  const key = cleaned.toLowerCase();
+  if (RETAILER_NAME_ALIASES[key]) return RETAILER_NAME_ALIASES[key];
+  // Strip common suffixes for any unknown retailer
+  return cleaned
+    .replace(/\.(com|co\.uk|net|org|store|shop)$/i, '')
+    .replace(/^the\s+/i, '')
+    .trim();
+}
+
 // Normalise whatever item_type the AI returns into our DB's allowed enum.
 // AI sometimes returns values like "film", "blog", "recipe", "website" that
 // aren't in our CHECK constraint — map them to the closest valid type rather
@@ -1122,7 +1177,7 @@ async function createProduct(data, sourceUrl, sourceType) {
                last_checked  = NOW()`,
         [
           productId,
-          data.retailer_name || extractRetailerName(sourceUrl),
+          normalizeRetailerName(data.retailer_name || extractRetailerName(sourceUrl)),
           sourceUrl,
           data.price || null,
           data.currency || 'GBP',
@@ -1234,9 +1289,33 @@ async function discoverRetailersInBackground(productId, productData) {
   // hardcoded RETAILER_TEMPLATES list which has been curl-verified by hand
   // and only contains working search URLs.
 
+  // ── De-duplicate suggestions by canonical retailer name ─────────────────
+  // The hardcoded scraper, the AI picker, and the always-on Google Shopping
+  // can all return overlapping retailers under slightly different names
+  // (e.g. "Amazon" vs "Amazon UK" vs "Amazon.co.uk"). We canonicalise the
+  // name AND fetch the existing retailer set for the product so we don't
+  // double-insert against an entry created by the import flow itself.
+  const existingRetailers = await query(
+    `SELECT retailer_name FROM product_retailers WHERE product_id = $1`,
+    [productId]
+  );
+  const seenNames = new Set(
+    existingRetailers.rows.map(r => normalizeRetailerName(r.retailer_name)?.toLowerCase()).filter(Boolean)
+  );
+
+  const dedupedSuggestions = [];
+  for (const s of suggestions) {
+    if (!s.url || !s.retailer_name) continue;
+    const canonical = normalizeRetailerName(s.retailer_name);
+    if (!canonical) continue;
+    const key = canonical.toLowerCase();
+    if (seenNames.has(key)) continue;
+    seenNames.add(key);
+    dedupedSuggestions.push({ ...s, retailer_name: canonical });
+  }
+
   await Promise.allSettled(
-    suggestions.map(async suggestion => {
-      if (!suggestion.url || !suggestion.retailer_name) return;
+    dedupedSuggestions.map(async suggestion => {
       try {
         const priceData = await scrapeRetailerPrice(suggestion.url).catch(err => {
           logger.debug('Retailer price scrape failed (expected for bot-blocked sites)', {
@@ -1276,8 +1355,7 @@ async function discoverRetailersInBackground(productId, productData) {
 
         // CASE C: scraper failed (bot block, JS-rendered, timeout) — store
         // the URL anyway. The user clicks through to view the page; the
-        // template is verified, so we trust it. The nightly price tracking
-        // job will retry the scrape later in case the block lifts.
+        // template is verified, so we trust it.
         scrapeFailed++;
         await query(
           `INSERT INTO product_retailers (product_id, retailer_name, product_url, current_price, currency, in_stock)
