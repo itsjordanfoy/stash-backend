@@ -20,6 +20,29 @@ function isSocialUrl(url) {
   } catch { return false; }
 }
 
+function isYouTubeUrl(url) {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return host.includes('youtube.com') || host.includes('youtu.be');
+  } catch { return false; }
+}
+
+/**
+ * Fetch YouTube metadata via the free oEmbed API (no API key needed).
+ * Returns { title, author_name, thumbnail_url, provider_name } or null.
+ */
+async function fetchYouTubeOembed(videoUrl) {
+  try {
+    const endpoint = `https://www.youtube.com/oembed?url=${encodeURIComponent(videoUrl)}&format=json`;
+    const axios = require('axios');
+    const res = await axios.get(endpoint, { timeout: 8000 });
+    return res.data || null;
+  } catch (err) {
+    logger.warn('YouTube oEmbed failed', { url: videoUrl, error: err.message });
+    return null;
+  }
+}
+
 /**
  * Clean up a social media item name.
  * Instagram OG titles are typically: "Username · platform on Instagram: 'caption…'"
@@ -250,6 +273,58 @@ async function processImport(importId, { userId, sourceType, sourceUrl, screensh
       } else {
         // OG failed — use URL structure to build a minimal but valid item
         extractedData = buildSocialFallback(sourceUrl);
+      }
+    } else if (isYouTubeUrl(sourceUrl)) {
+      // YouTube blocks server-side scraping — use the free oEmbed API instead.
+      // oEmbed reliably returns title, channel name, and thumbnail without any API key.
+      const oembed = await fetchYouTubeOembed(sourceUrl);
+      if (oembed) {
+        const ogData = {
+          title: oembed.title,
+          description: null,
+          image: oembed.thumbnail_url,
+          site_name: 'YouTube',
+        };
+        const urlCategory = 'YouTube Video';
+        const aiResult = await aiService.extractProductFromUrl(sourceUrl, null, ogData, urlCategory).catch(() => null);
+        if (aiResult && aiResult.confidence >= 0.4) {
+          extractedData = aiResult;
+        } else {
+          // AI struggled — build a clean item directly from oEmbed data
+          extractedData = {
+            name: oembed.title || 'YouTube Video',
+            item_type: 'youtube_video',
+            description: `Video by ${oembed.author_name || 'YouTube'}`,
+            category: 'YouTube',
+            image_url: oembed.thumbnail_url || null,
+            artist_or_director: oembed.author_name || null,
+            cta_label: 'Watch on YouTube',
+            cta_url: sourceUrl,
+            confidence: 0.85,
+          };
+        }
+        // Always ensure basic fields are populated from oEmbed when AI left them empty
+        if (!extractedData.image_url && oembed.thumbnail_url) extractedData.image_url = oembed.thumbnail_url;
+        if (!extractedData.artist_or_director && oembed.author_name) extractedData.artist_or_director = oembed.author_name;
+        if (!extractedData.cta_url) extractedData.cta_url = sourceUrl;
+        extractedData.confidence = Math.max(extractedData.confidence || 0, 0.85);
+      } else {
+        // oEmbed failed (private/deleted video) — try OG as last resort
+        const ogData = await scraperService.extractOpenGraph(sourceUrl, null).catch(() => null);
+        if (ogData?.title) {
+          extractedData = {
+            name: ogData.title,
+            item_type: 'youtube_video',
+            description: ogData.description || null,
+            category: 'YouTube',
+            image_url: ogData.image || null,
+            cta_label: 'Watch on YouTube',
+            cta_url: sourceUrl,
+            confidence: 0.8,
+          };
+        } else {
+          throw new Error('Could not load this YouTube video. It may be private or unavailable.');
+        }
       }
     } else {
       // link import — fetch page first, then extract OG from same HTML (avoids double request)
