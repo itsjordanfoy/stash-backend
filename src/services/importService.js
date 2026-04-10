@@ -823,7 +823,7 @@ async function processImport(importId, { userId, sourceType, sourceUrl, screensh
           ]
         );
       }
-      await finaliseImport(importId, userId, existingProduct.id, sourceUrl, sourceType, screenshotKey);
+      await finaliseImport(importId, userId, existingProduct.id, sourceUrl, sourceType, screenshotKey, extractedData);
       return;
     }
 
@@ -837,7 +837,7 @@ async function processImport(importId, { userId, sourceType, sourceUrl, screensh
             [JSON.stringify(questions), productId]).catch(() => {});
         }
       }).catch(() => {});
-      await finaliseImport(importId, userId, productId, sourceUrl, sourceType, screenshotKey);
+      await finaliseImport(importId, userId, productId, sourceUrl, sourceType, screenshotKey, extractedData);
       return;
     }
 
@@ -859,7 +859,7 @@ async function processImport(importId, { userId, sourceType, sourceUrl, screensh
             [JSON.stringify(questions), productId]).catch(() => {});
         }
       }).catch(() => {});
-      await finaliseImport(importId, userId, productId, sourceUrl, sourceType, screenshotKey);
+      await finaliseImport(importId, userId, productId, sourceUrl, sourceType, screenshotKey, extractedData);
       return;
     }
 
@@ -908,7 +908,8 @@ async function confirmImport(importId, userId, confirmedData) {
     productId,
     importRecord.source_url,
     importRecord.source_type,
-    importRecord.screenshot_key
+    importRecord.screenshot_key,
+    confirmedData
   );
 
   return productId;
@@ -1141,7 +1142,7 @@ async function createProduct(data, sourceUrl, sourceType) {
   });
 }
 
-async function finaliseImport(importId, userId, productId, sourceUrl, sourceType, screenshotKey) {
+async function finaliseImport(importId, userId, productId, sourceUrl, sourceType, screenshotKey, productData = null) {
   await transaction(async client => {
     // Upsert user_products
     await client.query(
@@ -1166,6 +1167,85 @@ async function finaliseImport(importId, userId, productId, sourceUrl, sourceType
 
   // Fire-and-forget OMDB enrichment for movies & TV — never blocks the import response
   enrichEntertainment(productId).catch(() => {});
+
+  // Fire-and-forget retailer discovery for product-type items.
+  // Previously this only ran from the /confirm path, so screenshot imports
+  // and direct URL imports never auto-populated "Where to buy" entries.
+  // Now every successful product import gets the same treatment.
+  if (productData && productData.item_type === 'product') {
+    discoverRetailersInBackground(productId, productData).catch(err => {
+      logger.warn('Background retailer discovery failed', {
+        productId,
+        error: err.message,
+      });
+    });
+  }
+}
+
+/**
+ * Auto-discover where to buy a product after a successful import.
+ * Runs the AI retailer search, scrapes each suggested URL, validates the
+ * page is actually about the same product, and inserts matching retailers
+ * into product_retailers. Designed to be fire-and-forget — failures here
+ * never affect the user-facing import flow.
+ */
+async function discoverRetailersInBackground(productId, productData) {
+  const { findRetailersForProduct } = require('./aiService');
+  const { scrapeRetailerPrice, isSameProduct } = require('./scraperService');
+
+  const product = {
+    id: productId,
+    name: productData.name,
+    brand: productData.brand,
+    category: productData.category,
+  };
+
+  const suggestions = await findRetailersForProduct(product);
+  if (!Array.isArray(suggestions) || suggestions.length === 0) return;
+
+  logger.info('Background retailer discovery starting', {
+    productId,
+    name: product.name,
+    candidates: suggestions.length,
+  });
+
+  let added = 0;
+  await Promise.allSettled(
+    suggestions.map(async suggestion => {
+      if (!suggestion.url || !suggestion.retailer_name) return;
+      try {
+        const priceData = await scrapeRetailerPrice(suggestion.url);
+        if (!priceData?.price) return;
+
+        // Reject if the page is for a different product (e.g. search returned
+        // a similar but wrong item)
+        if (!isSameProduct(product.name, product.brand, priceData.pageTitle)) {
+          logger.debug('Retailer search result rejected — different product', {
+            product: product.name,
+            retailer: suggestion.retailer_name,
+            pageTitle: priceData.pageTitle,
+          });
+          return;
+        }
+
+        await query(
+          `INSERT INTO product_retailers (product_id, retailer_name, product_url, current_price, currency, in_stock)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           ON CONFLICT (product_id, product_url) DO UPDATE
+             SET current_price = EXCLUDED.current_price,
+                 in_stock = EXCLUDED.in_stock,
+                 last_checked = NOW()`,
+          [productId, suggestion.retailer_name, suggestion.url, priceData.price, priceData.currency || 'GBP', priceData.in_stock ?? true]
+        );
+        added++;
+      } catch { /* swallow per-suggestion errors */ }
+    })
+  );
+
+  logger.info('Background retailer discovery complete', {
+    productId,
+    added,
+  });
 }
 
 async function findExistingProduct(data) {

@@ -121,61 +121,16 @@ router.post('/:id/confirm', authenticate, async (req, res) => {
   if (!productData) return res.status(400).json({ error: 'productData required' });
 
   try {
+    // confirmImport calls finaliseImport internally, which now fires
+    // discoverRetailersInBackground for product-type items — no need to
+    // duplicate it here.
     const productId = await confirmImport(req.params.id, req.user.id, productData);
     res.json({ productId, status: 'completed' });
-
-    // Auto-discover additional retailers in the background — don't block the response
-    discoverRetailersInBackground(productId, productData).catch(() => {});
   } catch (err) {
     logger.error('Import confirm error', { error: err.message });
     res.status(500).json({ error: 'Failed to confirm import' });
   }
 });
-
-async function discoverRetailersInBackground(productId, productData) {
-  const { findRetailersForProduct } = require('../services/aiService');
-  const { scrapeRetailerPrice, isSameProduct } = require('../services/scraperService');
-  const { query } = require('../database/db');
-
-  const product = {
-    id: productId,
-    name: productData.name,
-    brand: productData.brand,
-    category: productData.category,
-  };
-
-  const suggestions = await findRetailersForProduct(product);
-
-  await Promise.allSettled(
-    suggestions.map(async suggestion => {
-      if (!suggestion.url || !suggestion.retailer_name) return;
-      try {
-        const priceData = await scrapeRetailerPrice(suggestion.url);
-        if (!priceData?.price) return;
-
-        // Reject if the page is for a different product (e.g. search returned a similar but wrong item)
-        if (!isSameProduct(product.name, product.brand, priceData.pageTitle)) {
-          logger.debug('Retailer search result rejected — different product', {
-            product: product.name,
-            retailer: suggestion.retailer_name,
-            pageTitle: priceData.pageTitle,
-          });
-          return;
-        }
-
-        await query(
-          `INSERT INTO product_retailers (product_id, retailer_name, product_url, current_price, currency, in_stock)
-           VALUES ($1, $2, $3, $4, $5, $6)
-           ON CONFLICT (product_id, product_url) DO UPDATE
-             SET current_price = EXCLUDED.current_price,
-                 in_stock = EXCLUDED.in_stock,
-                 last_checked = NOW()`,
-          [productId, suggestion.retailer_name, suggestion.url, priceData.price, priceData.currency || 'GBP', priceData.in_stock ?? true]
-        );
-      } catch {}
-    })
-  );
-}
 
 // GET /api/imports — user's recent imports
 router.get('/', authenticate, async (req, res) => {
