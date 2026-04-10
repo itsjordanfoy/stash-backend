@@ -825,6 +825,8 @@ async function findRetailersForProduct(product) {
   // construct the search URL from a hardcoded, verified template. {Q} is
   // replaced with the URL-encoded search query.
   const RETAILER_TEMPLATES = {
+    // Universal aggregator — always works, shows multiple retailers in one click
+    'Google Shopping': 'https://www.google.com/search?tbm=shop&q={Q}',
     // Books
     'Amazon UK':       'https://www.amazon.co.uk/s?k={Q}',
     'Waterstones':     'https://www.waterstones.com/books/search/term/{Q}',
@@ -932,7 +934,19 @@ Return ONLY a JSON array of names, no markdown:
     logger.warn('AI retailer suggestion failed', { error: err.message });
   }
 
-  return [...hardcodedResults, ...aiSuggestions];
+  // Always include Google Shopping as a guaranteed fallback so the user
+  // never sees an empty "Where to buy" section, regardless of what the
+  // hardcoded scrapers and AI picker returned.
+  const encodedQueryFinal = encodeURIComponent(searchQuery);
+  const googleShopping = {
+    retailer_name: 'Google Shopping',
+    url: `https://www.google.com/search?tbm=shop&q=${encodedQueryFinal}`,
+  };
+  const combined = [...hardcodedResults, ...aiSuggestions];
+  if (!combined.some(s => s.retailer_name.toLowerCase() === 'google shopping')) {
+    combined.push(googleShopping);
+  }
+  return combined;
 }
 
 /**
