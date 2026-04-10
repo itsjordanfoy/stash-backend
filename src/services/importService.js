@@ -740,6 +740,65 @@ async function processImport(importId, { userId, sourceType, sourceUrl, screensh
 
     }
 
+    // ── Place geocoding — fill in lat/long from address via Nominatim ────
+    // When item_type='place' and we have an address but no coordinates,
+    // hit OpenStreetMap's free Nominatim API to geocode. This enables the
+    // map display for hotels/restaurants/venues that our scraper couldn't
+    // extract coordinates from (common on JS-rendered hospitality sites).
+    // Nominatim's usage policy requires a descriptive User-Agent and rate
+    // limiting (1 req/sec) — we honour both.
+    if (extractedData && extractedData.item_type === 'place' &&
+        extractedData.address &&
+        (extractedData.latitude == null || extractedData.longitude == null)) {
+      try {
+        const axios = require('axios');
+        const geocodeUrl = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(extractedData.address)}`;
+        const res = await axios.get(geocodeUrl, {
+          timeout: 6000,
+          headers: {
+            // Nominatim requires a descriptive UA identifying the app
+            'User-Agent': 'Stash/1.0 (https://stash.app)',
+            'Accept': 'application/json',
+          },
+        });
+        if (Array.isArray(res.data) && res.data.length > 0 && res.data[0].lat && res.data[0].lon) {
+          extractedData.latitude = parseFloat(res.data[0].lat);
+          extractedData.longitude = parseFloat(res.data[0].lon);
+          logger.info('Nominatim geocoded place', {
+            address: extractedData.address,
+            lat: extractedData.latitude,
+            lon: extractedData.longitude,
+          });
+        }
+      } catch (err) {
+        logger.debug('Nominatim geocoding failed', { address: extractedData.address, error: err.message });
+      }
+    }
+
+    // ── Place image fallback via screenshot ──────────────────────────────
+    // JS-rendered hospitality sites (Belmond, luxury hotels) don't expose
+    // images in their raw HTML. When item_type='place' and we have no
+    // images at all, trigger the screenshot API fallback to capture the
+    // page and let vision extract what's visible.
+    if (extractedData && extractedData.item_type === 'place' &&
+        !extractedData.image_url && sourceUrl) {
+      try {
+        const shot = await scraperService.captureScreenshot(sourceUrl);
+        if (shot?.base64) {
+          const visionData = await aiService.analyzeScreenshot(shot.base64, shot.mimeType);
+          if (visionData?.image_url) {
+            extractedData.image_url = visionData.image_url;
+            extractedData.images = Array.isArray(visionData.images) && visionData.images.length > 0
+              ? visionData.images
+              : [visionData.image_url];
+            logger.info('Place image recovered via screenshot fallback', { sourceUrl });
+          }
+        }
+      } catch (err) {
+        logger.debug('Place screenshot fallback failed', { error: err.message });
+      }
+    }
+
     // ── Open Library book cover fallback ─────────────────────────────────
     // Runs for ALL import types (link, screenshot, social) when the item
     // has an ISBN but no image. The cover API is free, no auth, and covers
@@ -1442,6 +1501,7 @@ async function discoverRetailersInBackground(productId, productData) {
     name: productData.name,
     brand: productData.brand,
     category: productData.category,
+    country: productData.country,
   };
 
   const suggestions = await findRetailersForProduct(product);
@@ -1460,21 +1520,10 @@ async function discoverRetailersInBackground(productId, productData) {
   let added = 0;
   let priceFound = 0;
   let titleMismatch = 0;
-  let scrapeFailed = 0;
+  let priceMissing = 0;
+  let dropped = 0;
 
-  // Note: we no longer do a liveness check on URLs that fail to scrape.
-  // The liveness check was over-aggressive — many retailers (Selfridges,
-  // Currys, JD Sports, Discogs, etc.) bot-block our backend's IP entirely
-  // even though the URL works fine in a real browser. Instead we trust the
-  // hardcoded RETAILER_TEMPLATES list which has been curl-verified by hand
-  // and only contains working search URLs.
-
-  // ── De-duplicate suggestions by canonical retailer name ─────────────────
-  // The hardcoded scraper, the AI picker, and the always-on Google Shopping
-  // can all return overlapping retailers under slightly different names
-  // (e.g. "Amazon" vs "Amazon UK" vs "Amazon.co.uk"). We canonicalise the
-  // name AND fetch the existing retailer set for the product so we don't
-  // double-insert against an entry created by the import flow itself.
+  // De-dup against existing retailers for this product by canonical name.
   const existingRetailers = await query(
     `SELECT retailer_name FROM product_retailers WHERE product_id = $1`,
     [productId]
@@ -1497,16 +1546,58 @@ async function discoverRetailersInBackground(productId, productData) {
   await Promise.allSettled(
     dedupedSuggestions.map(async suggestion => {
       try {
+        // ── Google Shopping is the only aggregator we store without
+        //    verification. It's labelled unambiguously as "Search Google
+        //    Shopping" in the UI and always works.
+        if (suggestion.retailer_name.toLowerCase() === 'google shopping') {
+          await query(
+            `INSERT INTO product_retailers (product_id, retailer_name, product_url, current_price, currency, in_stock)
+             VALUES ($1, $2, $3, NULL, 'GBP', TRUE)
+             ON CONFLICT (product_id, product_url) DO NOTHING`,
+            [productId, suggestion.retailer_name, suggestion.url]
+          );
+          added++;
+          return;
+        }
+
+        // ── All other retailers MUST be verified ─────────────────────────
+        // `findRetailersForProduct` tags them with verified=true when they
+        // came from a hardcoded scraper that followed search results to an
+        // actual product URL. Anything without verified=true is dropped —
+        // we refuse to store search URLs masquerading as product links.
+        if (!suggestion.verified) {
+          dropped++;
+          logger.debug('Retailer dropped — not verified', {
+            retailer: suggestion.retailer_name,
+            url: suggestion.url,
+          });
+          return;
+        }
+
+        // Try to scrape the price and confirm the page title matches.
+        // This is the final guardrail: even verified URLs can occasionally
+        // land on a different variant or a discontinued product.
         const priceData = await scrapeRetailerPrice(suggestion.url).catch(err => {
-          logger.debug('Retailer price scrape failed (expected for bot-blocked sites)', {
+          logger.debug('Verified retailer price scrape failed', {
             retailer: suggestion.retailer_name,
             error: err.message,
           });
           return null;
         });
 
-        // CASE A: full success — got price + matching title → store with price
-        if (priceData?.price && isSameProduct(product.name, product.brand, priceData.pageTitle)) {
+        // Title mismatch — reject entirely.
+        if (priceData?.pageTitle && !isSameProduct(product.name, product.brand, priceData.pageTitle)) {
+          titleMismatch++;
+          logger.info('Verified retailer rejected — title mismatch', {
+            product: product.name,
+            retailer: suggestion.retailer_name,
+            pageTitle: priceData.pageTitle,
+          });
+          return;
+        }
+
+        // Price + matching title → store with price
+        if (priceData?.price) {
           await query(
             `INSERT INTO product_retailers (product_id, retailer_name, product_url, current_price, currency, in_stock)
              VALUES ($1, $2, $3, $4, $5, $6)
@@ -1521,22 +1612,9 @@ async function discoverRetailersInBackground(productId, productData) {
           return;
         }
 
-        // CASE B: title clearly mismatched even though we got a price — reject
-        if (priceData?.price && priceData.pageTitle &&
-            !isSameProduct(product.name, product.brand, priceData.pageTitle)) {
-          titleMismatch++;
-          logger.info('Retailer rejected — title mismatch', {
-            product: product.name,
-            retailer: suggestion.retailer_name,
-            pageTitle: priceData.pageTitle,
-          });
-          return;
-        }
-
-        // CASE C: scraper failed (bot block, JS-rendered, timeout) — store
-        // the URL anyway. The user clicks through to view the page; the
-        // template is verified, so we trust it.
-        scrapeFailed++;
+        // No price but the URL is verified and title didn't mismatch —
+        // store without a price. The nightly job will retry scraping later.
+        priceMissing++;
         await query(
           `INSERT INTO product_retailers (product_id, retailer_name, product_url, current_price, currency, in_stock)
            VALUES ($1, $2, $3, NULL, 'GBP', TRUE)
@@ -1558,7 +1636,8 @@ async function discoverRetailersInBackground(productId, productData) {
     added,
     priceFound,
     titleMismatch,
-    scrapeFailed,
+    priceMissing,
+    dropped,
   });
 
   // ── Outlier price sanity check ─────────────────────────────────────────

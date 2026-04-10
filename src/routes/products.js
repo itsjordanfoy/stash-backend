@@ -2,6 +2,7 @@ const express = require('express');
 const { query } = require('../database/db');
 const { authenticate } = require('../middleware/auth');
 const { reExtractProduct } = require('../services/importService');
+const { logger } = require('../utils/logger');
 
 const router = express.Router();
 
@@ -168,6 +169,11 @@ router.get('/:id', authenticate, async (req, res) => {
                   p.price_range, p.menu_url, p.weather_forecast, p.nutrition, p.difficulty,
                   p.course_duration_hours::float AS course_duration_hours,
                   p.abv::float AS abv,
+                  -- BIGINT view_count returns as a JS string from node-pg (to avoid
+                  -- precision loss for bigints > 2^53). The iOS decoder expects Int
+                  -- and rejects string values, causing "Item Not Found". Cast to
+                  -- int so the JSON encodes it as a real number.
+                  p.view_count::int AS view_count,
                   up.source_url, up.source_type, up.screenshot_url,
                   up.is_tracking, up.notes, up.created_at as saved_at,
                   up.price_target::float AS price_target,
@@ -234,6 +240,24 @@ router.get('/:id', authenticate, async (req, res) => {
     if (product.opening_hours) product.opening_hours  = stringifyValues(product.opening_hours);
     if (product.streaming_links) product.streaming_links = stringifyValues(product.streaming_links);
 
+    // Belt-and-braces Int coercion — node-pg returns BIGINT as a JS string to
+    // preserve precision, and some callers store numeric values in fields that
+    // should have been INTEGER. The Swift decoder fails when it expects Int and
+    // gets a string, which manifests as "Item Not Found" in the UI. Force any
+    // known-int column to a real number (or null).
+    const INT_FIELDS = [
+      'view_count', 'word_count', 'read_time_minutes', 'page_count',
+      'episode_count', 'servings', 'metacritic_score', 'rotten_tomatoes_score',
+      'review_count', 'release_year', 'current_page', 'price_range',
+      'course_modules_count',
+    ];
+    for (const f of INT_FIELDS) {
+      if (product[f] != null && typeof product[f] === 'string') {
+        const n = parseInt(product[f], 10);
+        product[f] = Number.isFinite(n) ? n : null;
+      }
+    }
+
     res.set('Cache-Control', 'private, max-age=30, stale-while-revalidate=60');
     res.json({
       ...product,
@@ -244,6 +268,7 @@ router.get('/:id', authenticate, async (req, res) => {
       alternatives: alternativesResult.rows,
     });
   } catch (err) {
+    logger.error('Product fetch error', { productId: req.params.id, error: err.message });
     res.status(500).json({ error: 'Failed to load product' });
   }
 });

@@ -415,10 +415,46 @@ function extractImage($, baseUrl) {
 }
 
 function extractDescription($) {
+  // 1. OG meta — curated by the page author, usually concise
   const og = $('meta[property="og:description"]').attr('content');
-  if (og) return og.slice(0, 300);
   const meta = $('meta[name="description"]').attr('content');
-  if (meta) return meta.slice(0, 300);
+  const bestMeta = [og, meta].find(Boolean);
+
+  // 2. Try to find a substantial content block in the page body. Many sites
+  // (architect portfolios, editorial articles, long-form product pages) have
+  // rich description text in the main content area that's MUCH better than
+  // a terse meta tag. We look for semantic containers in priority order.
+  const containerSelectors = [
+    'article p',
+    'main p',
+    '[itemprop="description"] p, [itemprop="description"]',
+    '.description p, .description',
+    '.product-description p, .product-description',
+    '.content p',
+    'section p',
+  ];
+  let bestBlock = null;
+  for (const sel of containerSelectors) {
+    $(sel).each((_, el) => {
+      const text = $(el).text().trim().replace(/\s+/g, ' ');
+      // Good description: substantive prose (at least 80 chars),
+      // not a nav label or footer link.
+      if (text.length >= 80 && text.length <= 1500) {
+        if (!bestBlock || text.length > bestBlock.length) {
+          bestBlock = text;
+        }
+      }
+    });
+    if (bestBlock) break;
+  }
+
+  // 3. Pick the BEST of what we found. Long-body block beats short meta tag
+  // when the meta is clearly just a blurb (< 120 chars).
+  if (bestBlock && (!bestMeta || bestMeta.length < 120)) {
+    return bestBlock.slice(0, 500);
+  }
+  if (bestMeta) return bestMeta.slice(0, 500);
+  if (bestBlock) return bestBlock.slice(0, 500);
   return null;
 }
 
