@@ -11,7 +11,7 @@ const FREE_IMPORT_LIMIT = 5;
 
 // Social media hosts that block server-side scraping.
 // These are handled with a dedicated fallback path so they never fail.
-const SOCIAL_HOSTS = ['instagram.com', 'tiktok.com', 'twitter.com', 'x.com', 'pinterest.com', 'pinterest.co.uk', 'threads.net'];
+const SOCIAL_HOSTS = ['instagram.com', 'tiktok.com', 'twitter.com', 'x.com', 'pinterest.com', 'pinterest.co.uk', 'threads.net', 'reddit.com', 'redd.it'];
 
 function isSocialUrl(url) {
   try {
@@ -91,6 +91,70 @@ async function fetchSpotifyOembed(spotifyUrl) {
     return res.data || null;
   } catch (err) {
     logger.warn('Spotify oEmbed failed', { url: spotifyUrl, error: err.message });
+    return null;
+  }
+}
+
+/**
+ * Fetch TikTok metadata via their oEmbed API (no auth needed).
+ * Returns { title, author_name, thumbnail_url } or null.
+ */
+async function fetchTikTokOembed(videoUrl) {
+  try {
+    const axios = require('axios');
+    const res = await axios.get(
+      `https://www.tiktok.com/oembed?url=${encodeURIComponent(videoUrl)}`,
+      { timeout: 8000 }
+    );
+    return res.data || null;
+  } catch (err) {
+    logger.warn('TikTok oEmbed failed', { url: videoUrl, error: err.message });
+    return null;
+  }
+}
+
+/**
+ * Fetch Reddit post metadata.
+ * Tries the oEmbed endpoint first; falls back to the public JSON API.
+ * Returns a normalised { title, author, subreddit, image_url, url } or null.
+ */
+async function fetchRedditData(postUrl) {
+  const axios = require('axios');
+  // 1. Try oEmbed
+  try {
+    const res = await axios.get(
+      `https://www.reddit.com/oembed?url=${encodeURIComponent(postUrl)}`,
+      { timeout: 8000, headers: { 'User-Agent': 'Stash/1.0' } }
+    );
+    if (res.data?.title) {
+      return {
+        title: res.data.title,
+        author: res.data.author_name || null,
+        subreddit: null,
+        image_url: res.data.thumbnail_url || null,
+      };
+    }
+  } catch { /* fall through to JSON API */ }
+
+  // 2. Fall back to Reddit JSON API (/post.json)
+  try {
+    const jsonUrl = postUrl.replace(/\?.*$/, '').replace(/\/$/, '') + '.json?limit=1&raw_json=1';
+    const res = await axios.get(jsonUrl, {
+      timeout: 8000,
+      headers: { 'User-Agent': 'Stash/1.0' },
+    });
+    const post = res.data?.[0]?.data?.children?.[0]?.data;
+    if (!post) return null;
+    const thumb = post.thumbnail?.startsWith('http') ? post.thumbnail : null;
+    const preview = post.preview?.images?.[0]?.source?.url?.replace(/&amp;/g, '&') || null;
+    return {
+      title: post.title || null,
+      author: post.author || null,
+      subreddit: post.subreddit ? `r/${post.subreddit}` : null,
+      image_url: preview || thumb || null,
+    };
+  } catch (err) {
+    logger.warn('Reddit data fetch failed', { url: postUrl, error: err.message });
     return null;
   }
 }
@@ -187,6 +251,18 @@ function buildSocialFallback(sourceUrl) {
         description: 'Saved from Pinterest',
         category: 'Social Media',
         cta_label: 'View on Pinterest',
+        cta_url: sourceUrl,
+        confidence: 0.8,
+      };
+    }
+    if (host.includes('reddit.com') || host.includes('redd.it')) {
+      const subreddit = pathParts.find((p, i) => pathParts[i - 1] === 'r');
+      return {
+        name: subreddit ? `r/${subreddit} post` : 'Reddit Post',
+        item_type: 'article',
+        description: subreddit ? `Post in r/${subreddit}` : 'Post on Reddit',
+        category: 'Social Media',
+        cta_label: 'View on Reddit',
         cta_url: sourceUrl,
         confidence: 0.8,
       };
@@ -293,39 +369,53 @@ async function processImport(importId, { userId, sourceType, sourceUrl, screensh
         extractedData = await aiService.extractProductFromUrl(sourceUrl, pageResult?.html, ogData, urlCategory);
       }
     } else if (isSocialUrl(sourceUrl)) {
-      // Social media URLs (Instagram, TikTok, Twitter, Pinterest) block server-side scraping.
-      // Try OG extraction directly — public posts usually expose OG tags.
-      // If that fails, build a guaranteed minimal item from the URL structure.
+      // Social media URLs block server-side scraping.
+      // Platform-specific APIs give better data than OG tags; OG is fallback; URL structure is last resort.
+      const { hostname, pathname } = new URL(sourceUrl);
+      const host = hostname.toLowerCase();
       const urlCategory = classifyUrlCategory(sourceUrl);
-      const ogData = await scraperService.extractOpenGraph(sourceUrl, null).catch(() => null);
+      let platformData = null;
 
-      if (ogData && (ogData.title || ogData.image)) {
-        // OG worked — use AI to enrich, but always floor confidence at 0.8
-        const aiResult = await aiService.extractProductFromUrl(sourceUrl, null, ogData, urlCategory).catch(() => null);
+      // ── TikTok: oEmbed gives title + author + thumbnail reliably ──────────
+      if (host.includes('tiktok.com')) {
+        const oembed = await fetchTikTokOembed(sourceUrl).catch(() => null);
+        if (oembed?.title) platformData = { title: oembed.title, image: oembed.thumbnail_url, author: oembed.author_name };
+      }
+
+      // ── Reddit: oEmbed + public JSON API ──────────────────────────────────
+      if (host.includes('reddit.com') || host.includes('redd.it')) {
+        const reddit = await fetchRedditData(sourceUrl).catch(() => null);
+        if (reddit?.title) platformData = { title: reddit.title, image: reddit.image_url, author: reddit.author, subreddit: reddit.subreddit };
+      }
+
+      // ── All others (Instagram, X, Pinterest, Threads): try OG tags ────────
+      if (!platformData) {
+        const ogData = await scraperService.extractOpenGraph(sourceUrl, null).catch(() => null);
+        if (ogData?.title || ogData?.image) platformData = { title: ogData.title, image: ogData.image, description: ogData.description };
+      }
+
+      if (platformData) {
+        const ogForAi = { title: platformData.title, description: platformData.description || null, image: platformData.image || null, site_name: host.split('.').slice(-2, -1)[0] };
+        const aiResult = await aiService.extractProductFromUrl(sourceUrl, null, ogForAi, urlCategory).catch(() => null);
         if (aiResult && aiResult.confidence >= 0.4) {
           extractedData = aiResult;
         } else {
-          // AI couldn't help — use OG data directly
           extractedData = buildSocialFallback(sourceUrl);
-          if (ogData.title) extractedData.name = ogData.title;
-          if (ogData.description) extractedData.description = ogData.description;
-          if (ogData.image) extractedData.image_url = ogData.image;
+          if (platformData.title) extractedData.name = platformData.title;
+          if (platformData.description) extractedData.description = platformData.description;
+          if (platformData.image) extractedData.image_url = platformData.image;
         }
-        // Clean up messy social names (e.g. Instagram OG titles include full captions)
+        // Clean up messy Instagram-style "X on Platform: 'caption...'" names
         const cleanedName = sanitizeSocialName(extractedData.name, sourceUrl);
         if (cleanedName) extractedData.name = cleanedName;
-        // Guarantee confidence — the user deliberately shared this link
-        extractedData.confidence = Math.max(extractedData.confidence || 0, 0.8);
-        // Use OG image as fallback only when AI didn't find one.
-        // For Instagram reels the OG image is the video thumbnail (may include a baked-in play
-        // button overlay). If the AI already resolved a better image, keep that instead.
-        if (ogData.image && !extractedData.image_url) {
-          extractedData.image_url = ogData.image;
-        }
+        if (platformData.image && !extractedData.image_url) extractedData.image_url = platformData.image;
       } else {
-        // OG failed — use URL structure to build a minimal but valid item
+        // No data from any source — build minimal item from URL structure alone
         extractedData = buildSocialFallback(sourceUrl);
       }
+
+      // Always floor confidence — user deliberately shared this link
+      extractedData.confidence = Math.max(extractedData.confidence || 0, 0.8);
     } else if (isApplePodcastUrl(sourceUrl)) {
       // podcasts.apple.com blocks scraping — use iTunes Lookup API
       const podcastData = await fetchApplePodcastData(sourceUrl);
