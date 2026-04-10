@@ -794,6 +794,62 @@ async function processImport(importId, { userId, sourceType, sourceUrl, screensh
       extractedData.name = extractedData.name.slice(0, 77).trimEnd() + '…';
     }
 
+    // ── Junk-name detection ─────────────────────────────────────────────
+    // Sometimes the scraper "succeeds" but returns garbage: a JS-rendered
+    // page shell ("Spotify – Web Player"), a Cloudflare challenge page,
+    // or a neighbouring product's JSON-LD on a Cloudflare-protected site
+    // (Selfridges etc.). The name/description look real enough to pass the
+    // confidence threshold but they're not what the user asked for.
+    //
+    // Two heuristics catch these:
+    //   1. Exact match against a list of known "junk name" patterns
+    //   2. Cross-check the extracted name against the URL slug — if they
+    //      share no significant words, something likely went wrong.
+    if (extractedData && extractedData.name && sourceUrl) {
+      const name = extractedData.name.toLowerCase().trim();
+      const junkPatterns = [
+        /^spotify\b/i, /web.player/i, /^attention required/i, /^cloudflare/i,
+        /^page not found/i, /^404/i, /^500 /i, /^error /i,
+        /^instagram\s*(post|pin|story)?$/i, /^pinterest\s*(pin|post)?$/i,
+        /^social media post$/i, /^linkedin\b/i, /^just a moment/i,
+      ];
+      const isJunkName = junkPatterns.some(p => p.test(name));
+
+      // URL slug cross-check: extract significant words from the URL slug
+      // and compare to the name. If there's NO overlap at all, the scraped
+      // name is probably wrong. Only applies when the slug has meaningful words.
+      let slugMismatch = false;
+      try {
+        const urlObj = new URL(sourceUrl);
+        const slug = urlObj.pathname
+          .split('/')
+          .filter(Boolean)
+          .pop() || '';
+        const slugWords = slug
+          .toLowerCase()
+          .replace(/[^\w\s-]/g, ' ')
+          .replace(/[-_]/g, ' ')
+          .split(/\s+/)
+          .filter(w => w.length >= 4 && !/^\d+$/.test(w));
+        if (slugWords.length >= 2) {
+          const nameWords = new Set(name.replace(/[^\w\s]/g, ' ').split(/\s+/).filter(w => w.length >= 4));
+          const overlap = slugWords.filter(w => nameWords.has(w)).length;
+          if (overlap === 0) slugMismatch = true;
+        }
+      } catch { /* ignore */ }
+
+      if (isJunkName || slugMismatch) {
+        logger.warn('Junk name detected — forcing fallback', {
+          sourceUrl,
+          extractedName: extractedData.name,
+          isJunkName,
+          slugMismatch,
+        });
+        // Reset confidence so the fallback chain triggers.
+        extractedData.confidence = 0;
+      }
+    }
+
     // ── URL inference fallback ──────────────────────────────────────────
     // When scraping fails (bot-blocked sites, JS-rendered pages, empty HTML)
     // the AI extraction returns low confidence. Try one more pass using ONLY

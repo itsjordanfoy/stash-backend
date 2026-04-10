@@ -91,7 +91,7 @@ const URLS = [
   { category: 'Letterboxd film',      url: 'https://letterboxd.com/film/parasite-2019/' },
 
   // ── Music (3) ──────────────────────────────────────────────────────────────
-  { category: 'Spotify album',        url: 'https://open.spotify.com/album/1CuB5nB8XGgEZNkR0lz5hk' },
+  { category: 'Spotify album',        url: 'https://open.spotify.com/album/4m2880jivSbbyEGAKfITCa' },
   { category: 'Apple Music album',    url: 'https://music.apple.com/gb/album/random-access-memories/617154241' },
   { category: 'Discogs release',      url: 'https://www.discogs.com/release/2255988-Pink-Floyd-The-Dark-Side-Of-The-Moon' },
 
@@ -129,7 +129,7 @@ const URLS = [
   { category: 'Instagram post',       url: 'https://www.instagram.com/p/C5xYZaBz8qL/', expectedTag: 'Instagram' },
   { category: 'TikTok video',         url: 'https://www.tiktok.com/@zachking/video/7136971512639016238', expectedTag: 'TikTok' },
   { category: 'Reddit post',          url: 'https://www.reddit.com/r/DesignPorn/comments/1aabbcc/example/', expectedTag: 'Reddit' },
-  { category: 'Pinterest pin',        url: 'https://www.pinterest.co.uk/pin/3377768182/', expectedTag: 'Pinterest' },
+  { category: 'Pinterest pin',        url: 'https://www.pinterest.co.uk/pin/892205616025670056/', expectedTag: 'Pinterest' },
 
   // ── Places & maps (2) ──────────────────────────────────────────────────────
   { category: 'Google Maps',          url: 'https://maps.google.com/?q=Dishoom+Covent+Garden+London' },
