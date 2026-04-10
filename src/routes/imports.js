@@ -18,6 +18,22 @@ const upload = multer({
   },
 });
 
+// Resolve the user's country for region-aware retailer selection.
+// Priority: explicit X-Country header → Accept-Language header → GB default.
+function resolveRequestCountry(req) {
+  const explicit = req.headers['x-country'];
+  if (explicit && typeof explicit === 'string' && /^[a-z]{2}$/i.test(explicit)) {
+    return explicit.toUpperCase();
+  }
+  // Accept-Language like "en-US,en;q=0.9" → "US"
+  const accept = req.headers['accept-language'];
+  if (accept) {
+    const m = /^[a-z]{2}[-_]([a-z]{2})/i.exec(accept);
+    if (m) return m[1].toUpperCase();
+  }
+  return 'GB';
+}
+
 // POST /api/imports/link
 router.post('/link', authenticate, loadUserData, async (req, res) => {
   const { url } = req.body;
@@ -36,6 +52,7 @@ router.post('/link', authenticate, loadUserData, async (req, res) => {
       // Users should be able to save anything they want.
       sourceType: 'link',
       sourceUrl: url,
+      country: resolveRequestCountry(req),
     });
 
     res.status(202).json(result);
@@ -95,6 +112,7 @@ router.post('/screenshot', authenticate, loadUserData, upload.single('screenshot
       screenshotKey, // may be null — importService handles this gracefully
       rawText: base64Image, // base64 of the processed JPEG
       screenshotMime: 'image/jpeg', // matches the processed buffer
+      country: resolveRequestCountry(req),
     });
 
     res.status(202).json(result);

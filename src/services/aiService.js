@@ -830,63 +830,96 @@ async function findRetailersForProduct(product) {
   // Instead: Claude picks retailer NAMES from a fixed allowlist, and we
   // construct the search URL from a hardcoded, verified template. {Q} is
   // replaced with the URL-encoded search query.
-  // Every URL below has been curl-verified to return 200/301/302/403 (where
-  // 403 = bot blocked but real users access fine). Templates that returned
-  // 404/410 or genuinely failed have been removed.
+  //
+  // Templates are grouped by country code so users see retailers they can
+  // actually buy from. When the user's country is unknown we fall back to
+  // GB (the largest verified set). US is a starter set covering the most
+  // common categories.
+  const REGION_TEMPLATES = {
+    GB: {
+      'Amazon':          'https://www.amazon.co.uk/s?k={Q}',
+      'Waterstones':     'https://www.waterstones.com/books/search/term/{Q}',
+      "Blackwell's":     'https://blackwells.co.uk/bookshop/search?keyword={Q}',
+      'Hive':            'https://www.hive.co.uk/Search/Keyword?keyword={Q}',
+      'Wordery':         'https://wordery.com/search?term={Q}',
+      'World of Books':  'https://www.worldofbooks.com/en-gb/search?text={Q}',
+      'AbeBooks':        'https://www.abebooks.co.uk/servlet/SearchResults?kn={Q}',
+      'John Lewis':      'https://www.johnlewis.com/search?search-term={Q}',
+      'Argos':           'https://www.argos.co.uk/search/{Q}/',
+      'eBay':            'https://www.ebay.co.uk/sch/i.html?_nkw={Q}',
+      'Etsy':            'https://www.etsy.com/uk/search?q={Q}',
+      'Not On The High Street': 'https://www.notonthehighstreet.com/search?term={Q}',
+      'Currys':          'https://www.currys.co.uk/search?q={Q}',
+      'Very':            'https://www.very.co.uk/search?keywords={Q}',
+      'AO':              'https://ao.com/search?q={Q}',
+      'ASOS':            'https://www.asos.com/search?q={Q}',
+      'Selfridges':      'https://www.selfridges.com/GB/en/cat/?search={Q}',
+      'Liberty London':  'https://www.libertylondon.com/uk/search?q={Q}',
+      'Farfetch':        'https://www.farfetch.com/uk/shopping/search/items.aspx?q={Q}',
+      'Matches':         'https://www.matchesfashion.com/search?q={Q}',
+      'Lakeland':        'https://www.lakeland.co.uk/search?w={Q}',
+      'Dunelm':          'https://www.dunelm.com/category/search?searchTerm={Q}',
+      'IKEA':            'https://www.ikea.com/gb/en/search/?q={Q}',
+      'The Range':       'https://www.therange.co.uk/search/?w={Q}',
+      'Wayfair':         'https://www.wayfair.co.uk/keyword.php?keyword={Q}',
+      'Boots':           'https://www.boots.com/search/{Q}',
+      'Sephora':         'https://www.sephora.co.uk/search?q={Q}',
+      'Cult Beauty':     'https://www.cultbeauty.co.uk/search?w={Q}',
+      'Lookfantastic':   'https://www.lookfantastic.com/elysium.search?search={Q}',
+      'Space NK':        'https://www.spacenk.com/uk/search?q={Q}',
+      'Decathlon':       'https://www.decathlon.co.uk/search?Ntt={Q}',
+      'JD Sports':       'https://www.jdsports.co.uk/search/{Q}/',
+      'Tesco':           'https://www.tesco.com/groceries/en-GB/search?query={Q}',
+      "Sainsbury's":     'https://www.sainsburys.co.uk/gol-ui/SearchResults/{Q}',
+      'Ocado':           'https://www.ocado.com/search?entry={Q}',
+      'M&S':             'https://www.marksandspencer.com/l/food-to-order/search?q={Q}',
+      'Discogs':         'https://www.discogs.com/search/?q={Q}',
+      'Rough Trade':     'https://www.roughtrade.com/gb/search?q={Q}',
+      'Steam':           'https://store.steampowered.com/search/?term={Q}',
+      'Nintendo Store':  'https://store.nintendo.co.uk/en/search?q={Q}',
+    },
+    US: {
+      'Amazon':          'https://www.amazon.com/s?k={Q}',
+      'Barnes & Noble':  'https://www.barnesandnoble.com/s/{Q}',
+      'Books-A-Million': 'https://www.booksamillion.com/search?query={Q}',
+      'Bookshop.org':    'https://bookshop.org/search?keywords={Q}',
+      'AbeBooks':        'https://www.abebooks.com/servlet/SearchResults?kn={Q}',
+      'Target':          'https://www.target.com/s?searchTerm={Q}',
+      'Walmart':         'https://www.walmart.com/search?q={Q}',
+      'Best Buy':        'https://www.bestbuy.com/site/searchpage.jsp?st={Q}',
+      'Costco':          'https://www.costco.com/CatalogSearch?keyword={Q}',
+      'eBay':            'https://www.ebay.com/sch/i.html?_nkw={Q}',
+      'Etsy':            'https://www.etsy.com/search?q={Q}',
+      'Nordstrom':       'https://www.nordstrom.com/sr?keyword={Q}',
+      "Macy's":          'https://www.macys.com/shop/search?keyword={Q}',
+      'Bloomingdales':   'https://www.bloomingdales.com/shop/search?keyword={Q}',
+      'Saks Fifth Avenue': 'https://www.saksfifthavenue.com/search?q={Q}',
+      'Zappos':          'https://www.zappos.com/search?term={Q}',
+      'Wayfair':         'https://www.wayfair.com/keyword.php?keyword={Q}',
+      'Crate & Barrel':  'https://www.crateandbarrel.com/search?query={Q}',
+      'West Elm':        'https://www.westelm.com/search/results.html?words={Q}',
+      'IKEA':            'https://www.ikea.com/us/en/search/?q={Q}',
+      'Sephora':         'https://www.sephora.com/search?keyword={Q}',
+      'Ulta':            'https://www.ulta.com/search?Ntt={Q}',
+      'REI':             'https://www.rei.com/search?q={Q}',
+      "Dick's Sporting Goods": 'https://www.dickssportinggoods.com/search/SearchDisplay?searchTerm={Q}',
+      'Whole Foods':     'https://www.wholefoodsmarket.com/search?text={Q}',
+      'Kroger':          'https://www.kroger.com/search?query={Q}',
+      'GameStop':        'https://www.gamestop.com/search?q={Q}',
+      'Steam':           'https://store.steampowered.com/search/?term={Q}',
+      'Discogs':         'https://www.discogs.com/search/?q={Q}',
+    },
+  };
+
+  // Resolve country from product context (caller should pass user country).
+  // Default to GB (our largest verified set).
+  const country = (product.country && String(product.country).toUpperCase()) || 'GB';
+  // Clone the region's templates so we can add Google Shopping without
+  // polluting the shared REGION_TEMPLATES object.
   const RETAILER_TEMPLATES = {
-    // Universal aggregator — always works
-    'Google Shopping': 'https://www.google.com/search?tbm=shop&q={Q}',
-    // Books
-    'Amazon UK':       'https://www.amazon.co.uk/s?k={Q}',
-    'Waterstones':     'https://www.waterstones.com/books/search/term/{Q}',
-    "Blackwell's":     'https://blackwells.co.uk/bookshop/search?keyword={Q}',
-    'Foyles':          'https://www.foyles.co.uk/all?term={Q}',
-    'Hive':            'https://www.hive.co.uk/Search/Keyword?keyword={Q}',
-    'Wordery':         'https://wordery.com/search?term={Q}',
-    'World of Books':  'https://www.worldofbooks.com/en-gb/search?text={Q}',
-    'AbeBooks':        'https://www.abebooks.co.uk/servlet/SearchResults?kn={Q}',
-    // Generalists
-    'John Lewis':      'https://www.johnlewis.com/search?search-term={Q}',
-    'Argos':           'https://www.argos.co.uk/search/{Q}/',
-    'eBay UK':         'https://www.ebay.co.uk/sch/i.html?_nkw={Q}',
-    'Etsy':            'https://www.etsy.com/uk/search?q={Q}',
-    'Not On The High Street': 'https://www.notonthehighstreet.com/search?term={Q}',
-    // Electronics
-    'Currys':          'https://www.currys.co.uk/search?q={Q}',
-    'Very':            'https://www.very.co.uk/search?keywords={Q}',
-    'AO':              'https://ao.com/search?q={Q}',
-    // Fashion
-    'ASOS':            'https://www.asos.com/search?q={Q}',
-    'Selfridges':      'https://www.selfridges.com/GB/en/cat/?search={Q}',
-    'Liberty London':  'https://www.libertylondon.com/uk/search?q={Q}',
-    'Farfetch':        'https://www.farfetch.com/uk/shopping/search/items.aspx?q={Q}',
-    'Matches':         'https://www.matchesfashion.com/search?q={Q}',
-    // Home & kitchen
-    'Lakeland':        'https://www.lakeland.co.uk/search?w={Q}',
-    'Dunelm':          'https://www.dunelm.com/category/search?searchTerm={Q}',
-    'IKEA':            'https://www.ikea.com/gb/en/search/?q={Q}',
-    'The Range':       'https://www.therange.co.uk/search/?w={Q}',
-    'Wayfair':         'https://www.wayfair.co.uk/keyword.php?keyword={Q}',
-    // Beauty
-    'Boots':           'https://www.boots.com/search/{Q}',
-    'Sephora':         'https://www.sephora.co.uk/search?q={Q}',
-    'Cult Beauty':     'https://www.cultbeauty.co.uk/search?w={Q}',
-    'Lookfantastic':   'https://www.lookfantastic.com/elysium.search?search={Q}',
-    'Space NK':        'https://www.spacenk.com/uk/search?q={Q}',
-    // Sport & outdoor
-    'Decathlon':       'https://www.decathlon.co.uk/search?Ntt={Q}',
-    'JD Sports':       'https://www.jdsports.co.uk/search/{Q}/',
-    // Supermarkets / food
-    'Tesco':           'https://www.tesco.com/groceries/en-GB/search?query={Q}',
-    "Sainsbury's":     'https://www.sainsburys.co.uk/gol-ui/SearchResults/{Q}',
-    'Ocado':           'https://www.ocado.com/search?entry={Q}',
-    'M&S':             'https://www.marksandspencer.com/l/food-to-order/search?q={Q}',
-    // Music & vinyl
-    'Discogs':         'https://www.discogs.com/search/?q={Q}',
-    'Rough Trade':     'https://www.roughtrade.com/gb/search?q={Q}',
-    // Gaming
-    'Steam':           'https://store.steampowered.com/search/?term={Q}',
-    'Nintendo Store':  'https://store.nintendo.co.uk/en/search?q={Q}',
+    ...(REGION_TEMPLATES[country] || REGION_TEMPLATES.GB),
+    // Country-aware Google Shopping: gl targets the storefront.
+    'Google Shopping': `https://www.google.com/search?tbm=shop&q={Q}&gl=${country.toLowerCase()}&hl=en`,
   };
 
   let aiSuggestions = [];
@@ -894,7 +927,7 @@ async function findRetailersForProduct(product) {
     const aiMessage = await withRetry(() => client.messages.create({
       model: MODEL,
       max_tokens: 512,
-      system: `You are a UK shopping concierge. You only ever pick retailer NAMES from a fixed allowlist — you never invent retailers, never invent URLs.`,
+      system: `You are a shopping concierge for ${country} customers. Every retailer in your allowlist ships to ${country}. You only ever pick retailer NAMES from a fixed allowlist — you never invent retailers, never invent URLs.`,
       messages: [{
         role: 'user',
         content: `Product:
@@ -902,13 +935,13 @@ async function findRetailersForProduct(product) {
 - Brand: ${product.brand || '(unknown)'}
 - Category: ${product.category || '(unknown)'}
 
-From the allowlist below, pick the 6–8 retailers most likely to sell this exact product. Pick a varied mix — don't pick 8 fashion retailers for a book, or 8 supermarkets for electronics.
+From the ${country} allowlist below, pick the 6–8 retailers most likely to sell this product to a ${country} customer. Pick a varied mix that matches the product category — don't pick 8 fashion retailers for a book, or 8 supermarkets for electronics.
 
-ALLOWLIST (use these EXACT names, case-sensitive):
+ALLOWLIST (use these EXACT names, case-sensitive, ${country} retailers only):
 ${Object.keys(RETAILER_TEMPLATES).map(n => `- ${n}`).join('\n')}
 
 Return ONLY a JSON array of names, no markdown:
-["Waterstones", "Foyles", "Hive", ...]`,
+["Waterstones", "Blackwell's", "Hive", ...]`,
       }],
     }));
     const text = aiMessage.content.find(b => b.type === 'text')?.text || '[]';
@@ -924,6 +957,7 @@ Return ONLY a JSON array of names, no markdown:
           url: RETAILER_TEMPLATES[name].replace('{Q}', encodedQuery),
         }));
       logger.info('AI retailer suggestions', {
+        country,
         count: aiSuggestions.length,
         names: aiSuggestions.map(s => s.retailer_name),
       });
@@ -934,11 +968,10 @@ Return ONLY a JSON array of names, no markdown:
 
   // Always include Google Shopping as a guaranteed fallback so the user
   // never sees an empty "Where to buy" section, regardless of what the
-  // hardcoded scrapers and AI picker returned.
-  const encodedQueryFinal = encodeURIComponent(searchQuery);
+  // hardcoded scrapers and AI picker returned. Uses the resolved country.
   const googleShopping = {
     retailer_name: 'Google Shopping',
-    url: `https://www.google.com/search?tbm=shop&q=${encodedQueryFinal}`,
+    url: RETAILER_TEMPLATES['Google Shopping'].replace('{Q}', encodeURIComponent(searchQuery)),
   };
   const combined = [...hardcodedResults, ...aiSuggestions];
   if (!combined.some(s => s.retailer_name.toLowerCase() === 'google shopping')) {

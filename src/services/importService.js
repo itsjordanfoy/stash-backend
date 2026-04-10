@@ -326,7 +326,7 @@ function classifyUrlCategory(url) {
  * Main import orchestrator. Creates an import_queue entry and begins processing.
  * Returns { importId, status, product?, suggestions? }
  */
-async function startImport({ userId, sourceType, sourceUrl, screenshotKey, rawText, screenshotMime }) {
+async function startImport({ userId, sourceType, sourceUrl, screenshotKey, rawText, screenshotMime, country }) {
   // Create queue entry
   const queueResult = await query(
     `INSERT INTO import_queue (user_id, source_type, source_url, screenshot_key, raw_text, status)
@@ -337,7 +337,7 @@ async function startImport({ userId, sourceType, sourceUrl, screenshotKey, rawTe
   const importId = queueResult.rows[0].id;
 
   // Process async — don't await
-  processImport(importId, { userId, sourceType, sourceUrl, screenshotKey, rawText, screenshotMime }).catch(err => {
+  processImport(importId, { userId, sourceType, sourceUrl, screenshotKey, rawText, screenshotMime, country }).catch(err => {
     logger.error('Import processing failed', { importId, error: err.message });
     markFailed(importId, err.message).catch(() => {});
   });
@@ -345,7 +345,7 @@ async function startImport({ userId, sourceType, sourceUrl, screenshotKey, rawTe
   return { importId, status: 'processing' };
 }
 
-async function processImport(importId, { userId, sourceType, sourceUrl, screenshotKey, rawText, screenshotMime }) {
+async function processImport(importId, { userId, sourceType, sourceUrl, screenshotKey, rawText, screenshotMime, country }) {
   try {
     let extractedData = null;
 
@@ -668,6 +668,34 @@ async function processImport(importId, { userId, sourceType, sourceUrl, screensh
           extractedData.images = [fallbackImg, ...( extractedData.images || [])].filter(Boolean);
         }
       }
+
+      // Book-specific image fallback — Open Library's cover API is free,
+      // has no auth, and covers tens of millions of books by ISBN.
+      // Only used when we still don't have an image AND we have an ISBN.
+      if (!extractedData.image_url && extractedData.isbn) {
+        const cleanIsbn = String(extractedData.isbn).replace(/[^\dX]/gi, '');
+        if (cleanIsbn.length === 10 || cleanIsbn.length === 13) {
+          const coverUrl = `https://covers.openlibrary.org/b/isbn/${cleanIsbn}-L.jpg`;
+          logger.info('Trying Open Library cover by ISBN', { isbn: cleanIsbn, coverUrl });
+          try {
+            const axios = require('axios');
+            // default=false so we get 404 if there's no cover rather than a blank placeholder
+            const probe = await axios.get(`${coverUrl}?default=false`, {
+              timeout: 6000,
+              validateStatus: () => true,
+              maxContentLength: 20 * 1024 * 1024,
+              responseType: 'arraybuffer',
+            });
+            if (probe.status === 200 && probe.data.length > 1000) {
+              extractedData.image_url = coverUrl;
+              extractedData.images = [coverUrl, ...(extractedData.images || [])].filter(Boolean);
+              logger.info('Open Library cover found', { isbn: cleanIsbn });
+            }
+          } catch (err) {
+            logger.debug('Open Library cover fetch failed', { error: err.message });
+          }
+        }
+      }
     }
 
     // Ensure every item has a description — generate one from metadata if extraction missed it
@@ -815,6 +843,10 @@ async function processImport(importId, { userId, sourceType, sourceUrl, screensh
       await markFailed(importId, failMsg);
       return;
     }
+
+    // Stamp the user's country onto the extracted data so retailer discovery
+    // can pick the right regional retailer set (Amazon UK vs Amazon US, etc.).
+    if (country) extractedData.country = country;
 
     // Check for existing matching product
     const existingProduct = await findExistingProduct(extractedData);
