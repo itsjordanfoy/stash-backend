@@ -824,15 +824,17 @@ async function findRetailersForProduct(product) {
   // Instead: Claude picks retailer NAMES from a fixed allowlist, and we
   // construct the search URL from a hardcoded, verified template. {Q} is
   // replaced with the URL-encoded search query.
+  // Every URL below has been curl-verified to return 200/301/302/403 (where
+  // 403 = bot blocked but real users access fine). Templates that returned
+  // 404/410 or genuinely failed have been removed.
   const RETAILER_TEMPLATES = {
-    // Universal aggregator — always works, shows multiple retailers in one click
+    // Universal aggregator — always works
     'Google Shopping': 'https://www.google.com/search?tbm=shop&q={Q}',
     // Books
     'Amazon UK':       'https://www.amazon.co.uk/s?k={Q}',
     'Waterstones':     'https://www.waterstones.com/books/search/term/{Q}',
     "Blackwell's":     'https://blackwells.co.uk/bookshop/search?keyword={Q}',
     'Foyles':          'https://www.foyles.co.uk/all?term={Q}',
-    'WHSmith':         'https://www.whsmith.co.uk/search?w={Q}',
     'Hive':            'https://www.hive.co.uk/Search/Keyword?keyword={Q}',
     'Wordery':         'https://wordery.com/search?term={Q}',
     'World of Books':  'https://www.worldofbooks.com/en-gb/search?text={Q}',
@@ -848,45 +850,35 @@ async function findRetailersForProduct(product) {
     'Very':            'https://www.very.co.uk/search?keywords={Q}',
     'AO':              'https://ao.com/search?q={Q}',
     // Fashion
-    'ASOS':            'https://www.asos.com/search/?q={Q}',
+    'ASOS':            'https://www.asos.com/search?q={Q}',
     'Selfridges':      'https://www.selfridges.com/GB/en/cat/?search={Q}',
-    'Liberty London':  'https://www.libertylondon.com/uk/searchresults?_default_q={Q}',
-    'Harrods':         'https://www.harrods.com/en-gb/shopping/search?q={Q}',
-    'Net-a-Porter':    'https://www.net-a-porter.com/en-gb/shop/search?keywords={Q}',
+    'Liberty London':  'https://www.libertylondon.com/uk/search?q={Q}',
     'Farfetch':        'https://www.farfetch.com/uk/shopping/search/items.aspx?q={Q}',
-    'END.':            'https://www.endclothing.com/gb/catalogsearch/result/?q={Q}',
     'Matches':         'https://www.matchesfashion.com/search?q={Q}',
     // Home & kitchen
     'Lakeland':        'https://www.lakeland.co.uk/search?w={Q}',
-    'Dunelm':          'https://www.dunelm.com/search?searchTerm={Q}',
-    'Habitat':         'https://www.habitat.co.uk/search?q={Q}',
+    'Dunelm':          'https://www.dunelm.com/category/search?searchTerm={Q}',
     'IKEA':            'https://www.ikea.com/gb/en/search/?q={Q}',
     'The Range':       'https://www.therange.co.uk/search/?w={Q}',
     'Wayfair':         'https://www.wayfair.co.uk/keyword.php?keyword={Q}',
     // Beauty
     'Boots':           'https://www.boots.com/search/{Q}',
     'Sephora':         'https://www.sephora.co.uk/search?q={Q}',
-    'Cult Beauty':     'https://www.cultbeauty.co.uk/search?q={Q}',
+    'Cult Beauty':     'https://www.cultbeauty.co.uk/search?w={Q}',
     'Lookfantastic':   'https://www.lookfantastic.com/elysium.search?search={Q}',
     'Space NK':        'https://www.spacenk.com/uk/search?q={Q}',
     // Sport & outdoor
     'Decathlon':       'https://www.decathlon.co.uk/search?Ntt={Q}',
     'JD Sports':       'https://www.jdsports.co.uk/search/{Q}/',
-    'Sports Direct':   'https://www.sportsdirect.com/searchresults.html?DescriptionFilter={Q}',
-    'Wiggle':          'https://www.wiggle.com/p/search?term={Q}',
-    'Cotswold Outdoor':'https://www.cotswoldoutdoor.com/search?q={Q}',
     // Supermarkets / food
     'Tesco':           'https://www.tesco.com/groceries/en-GB/search?query={Q}',
     "Sainsbury's":     'https://www.sainsburys.co.uk/gol-ui/SearchResults/{Q}',
-    'Waitrose':        'https://www.waitrose.com/ecom/shop/search?searchTerm={Q}',
     'Ocado':           'https://www.ocado.com/search?entry={Q}',
     'M&S':             'https://www.marksandspencer.com/l/food-to-order/search?q={Q}',
     // Music & vinyl
-    'HMV':             'https://store.hmv.com/store/search?q={Q}',
     'Discogs':         'https://www.discogs.com/search/?q={Q}',
     'Rough Trade':     'https://www.roughtrade.com/gb/search?q={Q}',
     // Gaming
-    'GAME':            'https://www.game.co.uk/en/search?q={Q}',
     'Steam':           'https://store.steampowered.com/search/?term={Q}',
     'Nintendo Store':  'https://store.nintendo.co.uk/en/search?q={Q}',
   };

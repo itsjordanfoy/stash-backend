@@ -1199,7 +1199,6 @@ async function finaliseImport(importId, userId, productId, sourceUrl, sourceType
  * never affect the user-facing import flow.
  */
 async function discoverRetailersInBackground(productId, productData) {
-  const axios = require('axios');
   const { findRetailersForProduct } = require('./aiService');
   const { scrapeRetailerPrice, isSameProduct } = require('./scraperService');
 
@@ -1223,44 +1222,25 @@ async function discoverRetailersInBackground(productId, productData) {
     retailers: suggestions.map(s => s.retailer_name),
   });
 
-  // ── URL liveness check ──────────────────────────────────────────────────
-  // Even with hardcoded templates, retailers occasionally rebrand their search
-  // paths. Verify each URL responds (any 2xx/3xx) before storing it. We use a
-  // GET (not HEAD — many sites block HEAD) and only read the headers to keep
-  // it fast. Anything that 4xx/5xx or times out is silently dropped.
-  async function urlIsLive(url) {
-    try {
-      const res = await axios.get(url, {
-        timeout: 8000,
-        maxRedirects: 5,
-        validateStatus: () => true,
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-          'Accept': 'text/html,application/xhtml+xml',
-        },
-      });
-      // Treat anything under 400 as alive. Several big sites return 200 even
-      // for empty search results, which is fine — the page itself is real.
-      return res.status >= 200 && res.status < 400;
-    } catch {
-      return false;
-    }
-  }
-
   let added = 0;
   let priceFound = 0;
   let titleMismatch = 0;
   let scrapeFailed = 0;
-  let dead = 0;
+
+  // Note: we no longer do a liveness check on URLs that fail to scrape.
+  // The liveness check was over-aggressive — many retailers (Selfridges,
+  // Currys, JD Sports, Discogs, etc.) bot-block our backend's IP entirely
+  // even though the URL works fine in a real browser. Instead we trust the
+  // hardcoded RETAILER_TEMPLATES list which has been curl-verified by hand
+  // and only contains working search URLs.
 
   await Promise.allSettled(
     suggestions.map(async suggestion => {
       if (!suggestion.url || !suggestion.retailer_name) return;
       try {
         const priceData = await scrapeRetailerPrice(suggestion.url).catch(err => {
-          logger.warn('Retailer price scrape threw', {
+          logger.debug('Retailer price scrape failed (expected for bot-blocked sites)', {
             retailer: suggestion.retailer_name,
-            url: suggestion.url,
             error: err.message,
           });
           return null;
@@ -1294,20 +1274,10 @@ async function discoverRetailersInBackground(productId, productData) {
           return;
         }
 
-        // CASE C: scraper failed entirely (bot block, JS-rendered, timeout) —
-        // verify the URL is at least live before storing. We never want to
-        // store a URL that 404s. Liveness check uses a real GET so it works
-        // even on sites that block HEAD requests.
-        const live = await urlIsLive(suggestion.url);
-        if (!live) {
-          dead++;
-          logger.warn('Retailer URL is dead — skipping', {
-            retailer: suggestion.retailer_name,
-            url: suggestion.url,
-          });
-          return;
-        }
-
+        // CASE C: scraper failed (bot block, JS-rendered, timeout) — store
+        // the URL anyway. The user clicks through to view the page; the
+        // template is verified, so we trust it. The nightly price tracking
+        // job will retry the scrape later in case the block lifts.
         scrapeFailed++;
         await query(
           `INSERT INTO product_retailers (product_id, retailer_name, product_url, current_price, currency, in_stock)
@@ -1316,10 +1286,6 @@ async function discoverRetailersInBackground(productId, productData) {
           [productId, suggestion.retailer_name, suggestion.url]
         );
         added++;
-        logger.info('Retailer added without price (scrape failed, URL verified live)', {
-          retailer: suggestion.retailer_name,
-          url: suggestion.url,
-        });
       } catch (err) {
         logger.warn('Retailer discovery iteration failed', {
           retailer: suggestion.retailer_name,
@@ -1335,7 +1301,6 @@ async function discoverRetailersInBackground(productId, productData) {
     priceFound,
     titleMismatch,
     scrapeFailed,
-    dead,
   });
 }
 

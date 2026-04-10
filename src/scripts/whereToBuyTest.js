@@ -44,22 +44,47 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 // ── Test corpus — varied real-world products covering all retailer categories ─
 const TEST_PRODUCTS = [
-  // Books
-  { category: 'Book',           url: 'https://www.amazon.co.uk/Lonesome-Dove-Larry-McMurtry/dp/0330327070' },
-  // Electronics
-  { category: 'Electronics',    url: 'https://www.apple.com/uk/shop/buy-iphone/iphone-16-pro' },
-  // Home & Kitchen
-  { category: 'Home',           url: 'https://www.ikea.com/gb/en/p/kallax-shelving-unit-white-20275806/' },
-  // Beauty
-  { category: 'Beauty',         url: 'https://www.cultbeauty.co.uk/glossier-balm-dotcom' },
-  // Fashion
-  { category: 'Fashion',        url: 'https://www.nike.com/gb/t/air-force-1-07-shoe-WrLlWX' },
-  // Sport
-  { category: 'Sport',          url: 'https://www.wiggle.com/p/specialized-sirrus-x-3-0' },
-  // Music
-  { category: 'Music',          url: 'https://www.discogs.com/release/2255988-Pink-Floyd-The-Dark-Side-Of-The-Moon' },
-  // Gaming
-  { category: 'Gaming',         url: 'https://store.steampowered.com/app/1245620/ELDEN_RING/' },
+  // ── Books (4) ───────────────────────────────────────────────────────────
+  { category: 'Book — fiction',  url: 'https://www.amazon.co.uk/Lonesome-Dove-Larry-McMurtry/dp/0330327070' },
+  { category: 'Book — non-fic',  url: 'https://www.amazon.co.uk/Sapiens-Humankind-Yuval-Noah-Harari/dp/0099590085' },
+  { category: 'Book — cookbook', url: 'https://www.amazon.co.uk/Ottolenghi-SIMPLE-Yotam/dp/1785031163' },
+  { category: 'Book — children', url: 'https://www.amazon.co.uk/Gruffalo-Julia-Donaldson/dp/0333710932' },
+
+  // ── Electronics (5) ─────────────────────────────────────────────────────
+  { category: 'iPhone',          url: 'https://www.apple.com/uk/shop/buy-iphone/iphone-16-pro' },
+  { category: 'Camera',          url: 'https://www.amazon.co.uk/dp/B0BR68YP3K' },
+  { category: 'Headphones',      url: 'https://www.amazon.co.uk/dp/B0863TXGM3' },
+  { category: 'Laptop',          url: 'https://www.apple.com/uk/shop/buy-mac/macbook-pro' },
+  { category: 'TV',              url: 'https://www.amazon.co.uk/dp/B0BNGH9V14' },
+
+  // ── Home & Kitchen (4) ──────────────────────────────────────────────────
+  { category: 'IKEA furniture',  url: 'https://www.ikea.com/gb/en/p/kallax-shelving-unit-white-20275806/' },
+  { category: 'Cookware',        url: 'https://www.amazon.co.uk/dp/B0029JQEIC' },
+  { category: 'Coffee machine',  url: 'https://www.amazon.co.uk/dp/B07XPNRKQX' },
+  { category: 'Bedding',         url: 'https://www.amazon.co.uk/dp/B07K34QMLV' },
+
+  // ── Beauty (3) ──────────────────────────────────────────────────────────
+  { category: 'Skincare',        url: 'https://www.cultbeauty.co.uk/glossier-balm-dotcom' },
+  { category: 'Perfume',         url: 'https://www.amazon.co.uk/dp/B07GVF2MZP' },
+  { category: 'Haircare',        url: 'https://www.amazon.co.uk/dp/B084VT5JPS' },
+
+  // ── Fashion (4) ─────────────────────────────────────────────────────────
+  { category: 'Trainers',        url: 'https://www.nike.com/gb/t/air-force-1-07-shoe-WrLlWX' },
+  { category: 'Hoodie',          url: 'https://www.amazon.co.uk/dp/B07Q1QKT7Y' },
+  { category: 'Watch',           url: 'https://www.amazon.co.uk/dp/B09KGM7BSF' },
+  { category: 'Sunglasses',      url: 'https://www.amazon.co.uk/dp/B07Y7Y2YJ7' },
+
+  // ── Sport (2) ───────────────────────────────────────────────────────────
+  { category: 'Yoga mat',        url: 'https://www.amazon.co.uk/dp/B07GFQNZ5X' },
+  { category: 'Football',        url: 'https://www.amazon.co.uk/dp/B0B8BS4VZ8' },
+
+  // ── Music & vinyl (2) ───────────────────────────────────────────────────
+  { category: 'Vinyl record',    url: 'https://www.discogs.com/release/2255988-Pink-Floyd-The-Dark-Side-Of-The-Moon' },
+  { category: 'Album',           url: 'https://open.spotify.com/album/4LH4d3cOWNNsVw41Gqt2kv' },
+
+  // ── Gaming (2) ──────────────────────────────────────────────────────────
+  { category: 'Video game',      url: 'https://store.steampowered.com/app/1245620/ELDEN_RING/' },
+  { category: 'Console',         url: 'https://www.amazon.co.uk/dp/B0BCNKKZ91' },
 ];
 
 // ── HTTP helpers ─────────────────────────────────────────────────────────────
