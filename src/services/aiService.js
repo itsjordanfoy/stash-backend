@@ -714,10 +714,10 @@ async function generateSuggestedQuestions(product) {
   const message = await withRetry(() => client.messages.create({
     model: MODEL,
     max_tokens: 256,
-    system: `You generate short, casual questions that someone saving an item might genuinely want answered. Each question gets a relevant emoji prefix. Questions should be specific to this exact item — not generic. Return a JSON array of exactly 5 question strings. No markdown, no explanation.`,
+    system: `You generate natural, conversational questions someone saving an item might ask. Rules: (1) Each question must be 35 characters or fewer TOTAL including the emoji — write a complete natural question that fits in one line. (2) Start with a relevant emoji. (3) Specific to this exact item, not generic. (4) Return a JSON array of exactly 5 strings. No markdown, no explanation.`,
     messages: [{
       role: 'user',
-      content: `Generate 5 questions for this item:\n${context}\n\nReturn ONLY a JSON array of 5 strings, e.g. ["🎨 Is this available in other colours?", ...]`,
+      content: `Generate 5 questions for this item:\n${context}\n\nReturn ONLY a JSON array of 5 strings. Each must be 35 chars or fewer total including emoji — natural and conversational, e.g. ["🎬 Is it worth watching?", "💰 Good value for money?", "⭐ Better than competitors?"]`,
     }],
   }));
 
