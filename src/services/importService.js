@@ -1168,17 +1168,26 @@ async function finaliseImport(importId, userId, productId, sourceUrl, sourceType
   // Fire-and-forget OMDB enrichment for movies & TV — never blocks the import response
   enrichEntertainment(productId).catch(() => {});
 
-  // Fire-and-forget retailer discovery for product-type items.
-  // Previously this only ran from the /confirm path, so screenshot imports
-  // and direct URL imports never auto-populated "Where to buy" entries.
-  // Now every successful product import gets the same treatment.
-  if (productData && productData.item_type === 'product') {
-    discoverRetailersInBackground(productId, productData).catch(err => {
-      logger.warn('Background retailer discovery failed', {
-        productId,
-        error: err.message,
+  // Fire-and-forget retailer discovery for shoppable items.
+  // Mirrors the same gate used by createProduct: skip the inherently
+  // non-shoppable types (events, places, entertainment, courses, podcasts,
+  // youtube videos, articles) and run for everything else — products, books,
+  // video games, wine, apps, and general items that may be physical goods.
+  // This is the source of truth for "Where to buy" auto-population, so URL
+  // imports, screenshot imports, and confirm-flow imports all get the same
+  // treatment.
+  if (productData) {
+    const NON_SHOPPABLE = new Set([
+      'event', 'place', 'entertainment', 'course', 'podcast', 'youtube_video', 'article',
+    ]);
+    if (!NON_SHOPPABLE.has(productData.item_type)) {
+      discoverRetailersInBackground(productId, productData).catch(err => {
+        logger.warn('Background retailer discovery failed', {
+          productId,
+          error: err.message,
+        });
       });
-    });
+    }
   }
 }
 
