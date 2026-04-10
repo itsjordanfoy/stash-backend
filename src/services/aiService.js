@@ -11,9 +11,38 @@ const MODEL = 'claude-haiku-4-5';
  * Strip markdown code fences and parse JSON.
  * Claude sometimes wraps output in ```json ... ``` despite being told not to.
  */
+/**
+ * Parse JSON from a Claude response, with truncation recovery.
+ *
+ * Vision and URL extraction prompts ask for ~80 fields. When Claude runs out
+ * of tokens mid-emit, the JSON ends partway through a string or value and
+ * `JSON.parse` throws. We try a series of progressively-aggressive recovery
+ * tactics so a single missing closing brace never costs us a successful import.
+ */
 function parseJSON(text) {
   const stripped = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
-  return JSON.parse(stripped);
+  try {
+    return JSON.parse(stripped);
+  } catch {
+    // Recovery 1: walk back from the end to find the last complete key-value pair,
+    // then close the object cleanly.
+    const lastComma = stripped.lastIndexOf(',');
+    if (lastComma > 0) {
+      try {
+        return JSON.parse(stripped.slice(0, lastComma) + '\n}');
+      } catch { /* fall through */ }
+    }
+    // Recovery 2: drop the trailing partial line entirely and append }
+    const lastNewline = stripped.lastIndexOf('\n');
+    if (lastNewline > 0) {
+      try {
+        const trimmed = stripped.slice(0, lastNewline).replace(/,\s*$/, '');
+        return JSON.parse(trimmed + '\n}');
+      } catch { /* fall through */ }
+    }
+    // Last resort — re-throw so callers can fall back to their own error path
+    throw new Error('JSON parse failed even after truncation recovery');
+  }
 }
 
 /**
@@ -67,7 +96,10 @@ async function extractProductFromUrl(url, htmlContent = null, ogData = null, cat
 
   const message = await withRetry(() => client.messages.create({
     model: MODEL,
-    max_tokens: 1024,
+    // 2048 to fit the full ~80-field schema with rich content (book listings,
+    // movie pages, complex product specs). 1024 was clipping mid-JSON for
+    // anything content-rich, breaking parseJSON entirely.
+    max_tokens: 2048,
 
     system: `You are a universal content extraction specialist. Extract structured information from any web page — products, events, concerts, tickets, places, restaurants, movies, music, recipes, courses, podcasts, YouTube videos, TikTok videos, Instagram posts, video games, wine, articles, apps, or anything else worth saving. Always return valid JSON.`,
     messages: [
@@ -251,7 +283,9 @@ ${context}`,
 async function inferFromUrl(url) {
   const message = await withRetry(() => client.messages.create({
     model: MODEL,
-    max_tokens: 1024,
+    // Schema is smaller here but bumping for safety to avoid the same
+    // truncation class of failure on rare obscure URLs with rich descriptions.
+    max_tokens: 2048,
 
     system: `You are a URL-recognition specialist. You identify web pages from their URL alone using your extensive world knowledge of how major sites structure their URLs. You do NOT have the HTML — just the URL. Your job is to make an informed guess about what the page is, so the user can save it to their library.`,
     messages: [
@@ -316,7 +350,11 @@ IMPORTANT:
 async function analyzeScreenshot(imageBase64, mimeType = 'image/png') {
   const message = await withRetry(() => client.messages.create({
     model: MODEL,
-    max_tokens: 1024,
+    // 2048 to fit the full ~80-field schema for content-rich screenshots.
+    // 1024 was clipping mid-JSON on anything detailed (book pages, product
+    // listings with multiple editions, recipe pages, etc.) which fell through
+    // to parseJSON failure → confidence 0 → "couldn't identify" error.
+    max_tokens: 2048,
 
     system: `You are a universal content identification specialist with vision capabilities. Analyse screenshots to identify any kind of content — products, events, recipes, places, entertainment, courses, podcasts, videos, games, wine, articles, apps, and more.`,
     messages: [
