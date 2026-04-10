@@ -816,18 +816,85 @@ async function findRetailersForProduct(product) {
     .filter(r => r.status === 'fulfilled' && r.value)
     .map(r => r.value);
 
-  // ── AI-driven long tail of retailer suggestions ──────────────────────────
-  // The hardcoded list above is fast & deterministic but only covers 4–6
-  // retailers. Ask Claude to suggest 6–8 MORE category-appropriate retailers
-  // based on its world knowledge so the "Where to buy" section becomes a real
-  // shopping aid. Claude returns search-page URLs (not invented product URLs)
-  // so the user always lands on real, current results.
+  // ── Templated retailer suggestions ───────────────────────────────────────
+  // We do NOT let Claude generate URLs — it hallucinates plausible-looking
+  // paths that don't exist (e.g. /bookshop/search instead of /books/search,
+  // or suggests Book Depository which shut down in 2023).
+  //
+  // Instead: Claude picks retailer NAMES from a fixed allowlist, and we
+  // construct the search URL from a hardcoded, verified template. {Q} is
+  // replaced with the URL-encoded search query.
+  const RETAILER_TEMPLATES = {
+    // Books
+    'Amazon UK':       'https://www.amazon.co.uk/s?k={Q}',
+    'Waterstones':     'https://www.waterstones.com/books/search/term/{Q}',
+    "Blackwell's":     'https://blackwells.co.uk/bookshop/search?keyword={Q}',
+    'Foyles':          'https://www.foyles.co.uk/all?term={Q}',
+    'WHSmith':         'https://www.whsmith.co.uk/search?w={Q}',
+    'Hive':            'https://www.hive.co.uk/Search/Keyword?keyword={Q}',
+    'Wordery':         'https://wordery.com/search?term={Q}',
+    'World of Books':  'https://www.worldofbooks.com/en-gb/search?text={Q}',
+    'AbeBooks':        'https://www.abebooks.co.uk/servlet/SearchResults?kn={Q}',
+    // Generalists
+    'John Lewis':      'https://www.johnlewis.com/search?search-term={Q}',
+    'Argos':           'https://www.argos.co.uk/search/{Q}/',
+    'eBay UK':         'https://www.ebay.co.uk/sch/i.html?_nkw={Q}',
+    'Etsy':            'https://www.etsy.com/uk/search?q={Q}',
+    'Not On The High Street': 'https://www.notonthehighstreet.com/search?term={Q}',
+    // Electronics
+    'Currys':          'https://www.currys.co.uk/search?q={Q}',
+    'Very':            'https://www.very.co.uk/search?keywords={Q}',
+    'AO':              'https://ao.com/search?q={Q}',
+    // Fashion
+    'ASOS':            'https://www.asos.com/search/?q={Q}',
+    'Selfridges':      'https://www.selfridges.com/GB/en/cat/?search={Q}',
+    'Liberty London':  'https://www.libertylondon.com/uk/searchresults?_default_q={Q}',
+    'Harrods':         'https://www.harrods.com/en-gb/shopping/search?q={Q}',
+    'Net-a-Porter':    'https://www.net-a-porter.com/en-gb/shop/search?keywords={Q}',
+    'Farfetch':        'https://www.farfetch.com/uk/shopping/search/items.aspx?q={Q}',
+    'END.':            'https://www.endclothing.com/gb/catalogsearch/result/?q={Q}',
+    'Matches':         'https://www.matchesfashion.com/search?q={Q}',
+    // Home & kitchen
+    'Lakeland':        'https://www.lakeland.co.uk/search?w={Q}',
+    'Dunelm':          'https://www.dunelm.com/search?searchTerm={Q}',
+    'Habitat':         'https://www.habitat.co.uk/search?q={Q}',
+    'IKEA':            'https://www.ikea.com/gb/en/search/?q={Q}',
+    'The Range':       'https://www.therange.co.uk/search/?w={Q}',
+    'Wayfair':         'https://www.wayfair.co.uk/keyword.php?keyword={Q}',
+    // Beauty
+    'Boots':           'https://www.boots.com/search/{Q}',
+    'Sephora':         'https://www.sephora.co.uk/search?q={Q}',
+    'Cult Beauty':     'https://www.cultbeauty.co.uk/search?q={Q}',
+    'Lookfantastic':   'https://www.lookfantastic.com/elysium.search?search={Q}',
+    'Space NK':        'https://www.spacenk.com/uk/search?q={Q}',
+    // Sport & outdoor
+    'Decathlon':       'https://www.decathlon.co.uk/search?Ntt={Q}',
+    'JD Sports':       'https://www.jdsports.co.uk/search/{Q}/',
+    'Sports Direct':   'https://www.sportsdirect.com/searchresults.html?DescriptionFilter={Q}',
+    'Wiggle':          'https://www.wiggle.com/p/search?term={Q}',
+    'Cotswold Outdoor':'https://www.cotswoldoutdoor.com/search?q={Q}',
+    // Supermarkets / food
+    'Tesco':           'https://www.tesco.com/groceries/en-GB/search?query={Q}',
+    "Sainsbury's":     'https://www.sainsburys.co.uk/gol-ui/SearchResults/{Q}',
+    'Waitrose':        'https://www.waitrose.com/ecom/shop/search?searchTerm={Q}',
+    'Ocado':           'https://www.ocado.com/search?entry={Q}',
+    'M&S':             'https://www.marksandspencer.com/l/food-to-order/search?q={Q}',
+    // Music & vinyl
+    'HMV':             'https://store.hmv.com/store/search?q={Q}',
+    'Discogs':         'https://www.discogs.com/search/?q={Q}',
+    'Rough Trade':     'https://www.roughtrade.com/gb/search?q={Q}',
+    // Gaming
+    'GAME':            'https://www.game.co.uk/en/search?q={Q}',
+    'Steam':           'https://store.steampowered.com/search/?term={Q}',
+    'Nintendo Store':  'https://store.nintendo.co.uk/en/search?q={Q}',
+  };
+
   let aiSuggestions = [];
   try {
     const aiMessage = await withRetry(() => client.messages.create({
       model: MODEL,
-      max_tokens: 1024,
-      system: `You are a UK shopping concierge. For any product, you know the most likely UK retailers that sell it. You output JSON with retailer names and SEARCH URLs (not invented product URLs). The user clicks through to a real, live search results page on each retailer.`,
+      max_tokens: 512,
+      system: `You are a UK shopping concierge. You only ever pick retailer NAMES from a fixed allowlist — you never invent retailers, never invent URLs.`,
       messages: [{
         role: 'user',
         content: `Product:
@@ -835,26 +902,31 @@ async function findRetailersForProduct(product) {
 - Brand: ${product.brand || '(unknown)'}
 - Category: ${product.category || '(unknown)'}
 
-List 6–8 UK retailers most likely to sell this exact product. For each, provide a SEARCH URL — the real, working search URL for that retailer with the product name URL-encoded as the query parameter. Cover a mix of: large generalists (Amazon, John Lewis, Argos), category specialists (Foyles for books, Currys for electronics, Lakeland for kitchen, etc.), supermarkets if relevant (Tesco, Sainsbury's), and quality specialists where applicable (Selfridges, Liberty, Harrods).
+From the allowlist below, pick the 6–8 retailers most likely to sell this exact product. Pick a varied mix — don't pick 8 fashion retailers for a book, or 8 supermarkets for electronics.
 
-DO NOT invent product page URLs. Only return search URLs you are 100% confident about (e.g. https://www.foyles.co.uk/all?term=nazi+mind, https://www.waterstones.com/books/search/term/nazi+mind).
+ALLOWLIST (use these EXACT names, case-sensitive):
+${Object.keys(RETAILER_TEMPLATES).map(n => `- ${n}`).join('\n')}
 
-Return ONLY a JSON array, no markdown:
-[
-  {"retailer_name": "Foyles", "url": "https://..."},
-  {"retailer_name": "Waterstones", "url": "https://..."}
-]`,
+Return ONLY a JSON array of names, no markdown:
+["Waterstones", "Foyles", "Hive", ...]`,
       }],
     }));
     const text = aiMessage.content.find(b => b.type === 'text')?.text || '[]';
     const parsed = parseJSON(text);
     if (Array.isArray(parsed)) {
+      const encodedQuery = encodeURIComponent(searchQuery);
       aiSuggestions = parsed
-        .filter(s => s && typeof s.url === 'string' && typeof s.retailer_name === 'string')
-        .filter(s => /^https?:\/\//.test(s.url))
-        // De-duplicate against the hardcoded results — match by retailer name (case-insensitive)
-        .filter(s => !hardcodedResults.some(h => h.retailer_name.toLowerCase() === s.retailer_name.toLowerCase()));
-      logger.info('AI retailer suggestions', { count: aiSuggestions.length, names: aiSuggestions.map(s => s.retailer_name) });
+        .filter(name => typeof name === 'string' && RETAILER_TEMPLATES[name])
+        // Don't double up on retailers we already scraped via the hardcoded list
+        .filter(name => !hardcodedResults.some(h => h.retailer_name.toLowerCase() === name.toLowerCase()))
+        .map(name => ({
+          retailer_name: name,
+          url: RETAILER_TEMPLATES[name].replace('{Q}', encodedQuery),
+        }));
+      logger.info('AI retailer suggestions', {
+        count: aiSuggestions.length,
+        names: aiSuggestions.map(s => s.retailer_name),
+      });
     }
   } catch (err) {
     logger.warn('AI retailer suggestion failed', { error: err.message });
