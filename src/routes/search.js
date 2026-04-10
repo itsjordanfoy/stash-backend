@@ -4,18 +4,40 @@ const { authenticate } = require('../middleware/auth');
 
 const router = express.Router();
 
-// Shared CASE expression — mirrors the Swift filterTag logic exactly.
-// Music is NOT gated on item_type='entertainment' so vinyl records (item_type=product) resolve correctly.
+// Shared CASE expression — mirrors the Swift Product.filterTag logic exactly.
+// Order matters: first match wins, so unambiguous item_type checks come first,
+// then keyword detection. The final ELSE returns 'Saved' rather than the raw
+// p.category so the filter chip bar never leaks AI-generated subcategories
+// like "History/Non-fiction" or "Natural Science".
 const FILTER_TAG_CASE = `
   CASE
-    WHEN p.item_type = 'event' THEN 'Events'
-    WHEN p.item_type = 'place' THEN 'Places'
+    -- ── 1. Unambiguous item_type overrides ────────────────────────────────
+    WHEN p.item_type = 'course'        THEN 'Courses'
+    WHEN p.item_type = 'podcast'       THEN 'Podcasts'
+    WHEN p.item_type = 'youtube_video' THEN 'YouTube'
+    WHEN p.item_type = 'video_game'    THEN 'Games'
+    WHEN p.item_type = 'wine'          THEN 'Wine & Spirits'
+    WHEN p.item_type = 'article'       THEN 'Articles'
+    WHEN p.item_type = 'app'           THEN 'Apps'
+    WHEN p.item_type = 'event'         THEN 'Events'
+    WHEN p.item_type = 'place'         THEN 'Places'
     WHEN p.item_type = 'general' AND p.ingredients IS NOT NULL THEN 'Recipes'
+    -- ── 2. Books (no dedicated item_type — keyword detected) ──────────────
+    WHEN p.category ILIKE '%book%' OR p.category ILIKE '%novel%' OR p.category ILIKE '%fiction%'
+      OR p.category ILIKE '%non-fiction%' OR p.category ILIKE '%nonfiction%' OR p.category ILIKE '%literature%'
+      OR p.category ILIKE '%biography%' OR p.category ILIKE '%memoir%' OR p.category ILIKE '%history%'
+      OR p.category ILIKE '%self-help%' OR p.category ILIKE '%self help%' OR p.category ILIKE '%philosophy%'
+      OR p.category ILIKE '%psychology%' OR p.category ILIKE '%natural science%' OR p.category ILIKE '%humanities%'
+      OR p.brand ILIKE '%penguin%' OR p.brand ILIKE '%harper%' OR p.brand ILIKE '%random house%'
+      OR p.brand ILIKE '%bloomsbury%' OR p.brand ILIKE '%vintage%' OR p.brand ILIKE '%macmillan%'
+      OR p.isbn IS NOT NULL THEN 'Books'
+    -- ── 3. Clothing ────────────────────────────────────────────────────────
     WHEN p.category ILIKE '%cloth%' OR p.category ILIKE '%fashion%' OR p.category ILIKE '%apparel%'
       OR p.category ILIKE '%shirt%' OR p.category ILIKE '%hoodie%' OR p.category ILIKE '%jacket%'
       OR p.category ILIKE '%denim%' OR p.category ILIKE '%shoe%' OR p.category ILIKE '%sneaker%'
       OR p.name ILIKE '%shirt%' OR p.name ILIKE '%hoodie%' OR p.name ILIKE '%jacket%'
       OR p.name ILIKE '%sneaker%' OR p.name ILIKE '%trainer%' THEN 'Clothing'
+    -- ── 4. Music ───────────────────────────────────────────────────────────
     WHEN p.category ILIKE '%music%' OR p.category ILIKE '%vinyl%' OR p.category ILIKE '%album%'
       OR p.category ILIKE '%record%' OR p.category ILIKE '%soundtrack%' OR p.category ILIKE '%discograph%'
       OR p.genre ILIKE '%music%' OR p.genre ILIKE '%hip%' OR p.genre ILIKE '%rock%'
@@ -23,6 +45,7 @@ const FILTER_TAG_CASE = `
       OR p.genre ILIKE '%electronic%' OR p.genre ILIKE '%soul%' OR p.genre ILIKE '%classical%'
       OR p.genre ILIKE '%folk%' OR p.genre ILIKE '%metal%' OR p.genre ILIKE '%punk%'
       OR p.genre ILIKE '%reggae%' OR p.genre ILIKE '%blues%' OR p.genre ILIKE '%rap%' THEN 'Music'
+    -- ── 5. Movies & TV ─────────────────────────────────────────────────────
     WHEN p.item_type = 'entertainment'
       OR p.category ILIKE '%film%' OR p.category ILIKE '%movie%' OR p.category ILIKE '%cinema%'
       OR p.category ILIKE '%animation%' OR p.category ILIKE '%anime%' OR p.category ILIKE '%cartoon%'
@@ -36,6 +59,7 @@ const FILTER_TAG_CASE = `
       OR p.genre ILIKE '%drama%' OR p.genre ILIKE '%comedy%' OR p.genre ILIKE '%action%'
       OR p.genre ILIKE '%thriller%' OR p.genre ILIKE '%horror%' OR p.genre ILIKE '%fantasy%'
       OR p.genre ILIKE '%documentary%' OR p.genre ILIKE '%sci-fi%' THEN 'Movies & TV'
+    -- ── 6. Electronics ─────────────────────────────────────────────────────
     WHEN p.category ILIKE '%electron%' OR p.category ILIKE '%tech%' OR p.category ILIKE '%audio%'
       OR p.category ILIKE '%camera%' OR p.category ILIKE '%photo%' OR p.category ILIKE '%lens%'
       OR p.category ILIKE '%dslr%' OR p.category ILIKE '%mirrorless%' OR p.category ILIKE '%optic%'
@@ -43,19 +67,37 @@ const FILTER_TAG_CASE = `
       OR p.category ILIKE '%speaker%' OR p.category ILIKE '%console%' OR p.category ILIKE '%gaming%'
       OR p.name ILIKE '%camera%' OR p.name ILIKE '%photo%' OR p.name ILIKE '%lens%'
       OR p.name ILIKE '%mirrorless%' OR p.name ILIKE '%dslr%' THEN 'Electronics'
+    -- ── 7. Home ────────────────────────────────────────────────────────────
     WHEN p.category ILIKE '%home%' OR p.category ILIKE '%furniture%' OR p.category ILIKE '%kitchen%'
       OR p.category ILIKE '%bedroom%' OR p.category ILIKE '%garden%' OR p.category ILIKE '%lighting%'
       OR p.name ILIKE '%furniture%' OR p.name ILIKE '%cookware%' THEN 'Home'
+    -- ── 8. Beauty ──────────────────────────────────────────────────────────
     WHEN p.category ILIKE '%beauty%' OR p.category ILIKE '%skincare%' OR p.category ILIKE '%fragrance%'
       OR p.category ILIKE '%makeup%' OR p.category ILIKE '%grooming%' OR p.category ILIKE '%haircare%'
       OR p.name ILIKE '%perfume%' OR p.name ILIKE '%cologne%' THEN 'Beauty'
+    -- ── 9. Sports ──────────────────────────────────────────────────────────
     WHEN p.category ILIKE '%sport%' OR p.category ILIKE '%fitness%' OR p.category ILIKE '%gym%'
       OR p.category ILIKE '%cycling%' OR p.category ILIKE '%running%' OR p.category ILIKE '%yoga%'
       OR p.category ILIKE '%hiking%' OR p.category ILIKE '%golf%' OR p.category ILIKE '%tennis%' THEN 'Sports'
+    -- ── 10. Food & Drink ───────────────────────────────────────────────────
     WHEN p.category ILIKE '%food%' OR p.category ILIKE '%drink%' OR p.category ILIKE '%wine%'
       OR p.category ILIKE '%coffee%' OR p.category ILIKE '%grocery%' OR p.category ILIKE '%beverage%'
       OR p.category ILIKE '%spirits%' OR p.category ILIKE '%tea%' THEN 'Food & Drink'
-    ELSE p.category
+    -- ── 11. Health / Finance / Travel / Design — broad buckets ─────────────
+    WHEN p.category ILIKE '%health%' OR p.category ILIKE '%wellness%' OR p.category ILIKE '%nutrition%'
+      OR p.category ILIKE '%medical%' OR p.category ILIKE '%medicine%' OR p.category ILIKE '%mindfulness%'
+      THEN 'Health'
+    WHEN p.category ILIKE '%finance%' OR p.category ILIKE '%investing%' OR p.category ILIKE '%investment%'
+      OR p.category ILIKE '%money%' OR p.category ILIKE '%banking%' OR p.category ILIKE '%crypto%'
+      OR p.category ILIKE '%stocks%' OR p.category ILIKE '%trading%' THEN 'Finance'
+    WHEN p.category ILIKE '%travel%' OR p.category ILIKE '%destination%' OR p.category ILIKE '%holiday%'
+      OR p.category ILIKE '%vacation%' OR p.category ILIKE '%tourism%' THEN 'Travel'
+    WHEN p.category ILIKE '%design%' OR p.category ILIKE '%architecture%' OR p.category ILIKE '%interior%'
+      OR p.category ILIKE '%art%' OR p.category ILIKE '%illustration%' OR p.category ILIKE '%graphic%'
+      OR p.category ILIKE '%typography%' THEN 'Design & Art'
+    -- ── 12. Final fallback ─────────────────────────────────────────────────
+    -- Never leak the raw AI category (e.g. "History/Non-fiction"); use Saved.
+    ELSE 'Saved'
   END`;
 
 // GET /api/search/categories  — filter tags for the user's collection
@@ -95,9 +137,44 @@ function tagCondition(tag) {
     OR p.genre ILIKE '%reggae%' OR p.genre ILIKE '%blues%' OR p.genre ILIKE '%rap%'
   )`;
   switch (tag) {
-    case 'Events':     return "p.item_type = 'event'";
-    case 'Places':     return "p.item_type = 'place'";
-    case 'Recipes':    return "p.item_type = 'general' AND p.ingredients IS NOT NULL";
+    case 'Events':         return "p.item_type = 'event'";
+    case 'Places':         return "p.item_type = 'place'";
+    case 'Recipes':        return "p.item_type = 'general' AND p.ingredients IS NOT NULL";
+    case 'Courses':        return "p.item_type = 'course'";
+    case 'Podcasts':       return "p.item_type = 'podcast'";
+    case 'YouTube':        return "p.item_type = 'youtube_video'";
+    case 'Games':          return "p.item_type = 'video_game'";
+    case 'Wine & Spirits': return "p.item_type = 'wine'";
+    case 'Articles':       return "p.item_type = 'article'";
+    case 'Apps':           return "p.item_type = 'app'";
+    case 'Books': return `(
+      p.category ILIKE '%book%' OR p.category ILIKE '%novel%' OR p.category ILIKE '%fiction%'
+      OR p.category ILIKE '%non-fiction%' OR p.category ILIKE '%nonfiction%' OR p.category ILIKE '%literature%'
+      OR p.category ILIKE '%biography%' OR p.category ILIKE '%memoir%' OR p.category ILIKE '%history%'
+      OR p.category ILIKE '%self-help%' OR p.category ILIKE '%self help%' OR p.category ILIKE '%philosophy%'
+      OR p.category ILIKE '%psychology%' OR p.category ILIKE '%natural science%' OR p.category ILIKE '%humanities%'
+      OR p.brand ILIKE '%penguin%' OR p.brand ILIKE '%harper%' OR p.brand ILIKE '%random house%'
+      OR p.brand ILIKE '%bloomsbury%' OR p.brand ILIKE '%vintage%' OR p.brand ILIKE '%macmillan%'
+      OR p.isbn IS NOT NULL
+    )`;
+    case 'Health': return `(
+      p.category ILIKE '%health%' OR p.category ILIKE '%wellness%' OR p.category ILIKE '%nutrition%'
+      OR p.category ILIKE '%medical%' OR p.category ILIKE '%medicine%' OR p.category ILIKE '%mindfulness%'
+    )`;
+    case 'Finance': return `(
+      p.category ILIKE '%finance%' OR p.category ILIKE '%investing%' OR p.category ILIKE '%investment%'
+      OR p.category ILIKE '%money%' OR p.category ILIKE '%banking%' OR p.category ILIKE '%crypto%'
+      OR p.category ILIKE '%stocks%' OR p.category ILIKE '%trading%'
+    )`;
+    case 'Travel': return `(
+      p.category ILIKE '%travel%' OR p.category ILIKE '%destination%' OR p.category ILIKE '%holiday%'
+      OR p.category ILIKE '%vacation%' OR p.category ILIKE '%tourism%'
+    )`;
+    case 'Design & Art': return `(
+      p.category ILIKE '%design%' OR p.category ILIKE '%architecture%' OR p.category ILIKE '%interior%'
+      OR p.category ILIKE '%art%' OR p.category ILIKE '%illustration%' OR p.category ILIKE '%graphic%'
+      OR p.category ILIKE '%typography%'
+    )`;
     case 'Music':      return musicCat;
     case 'Movies & TV': return `(
       p.item_type = 'entertainment'
